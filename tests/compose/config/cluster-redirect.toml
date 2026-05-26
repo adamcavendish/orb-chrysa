@@ -1,0 +1,24 @@
+[server]
+listen = "0.0.0.0:5050"
+
+[server.limits]
+max_concurrent_uploads = 64
+max_concurrent_requests = 512
+
+[storage.s3]
+endpoint = "http://rustfs:9000"
+bucket = "orb-chrysa"
+region = "us-east-1"
+access_key = "rustfsadmin"
+secret_key = "rustfsadmin"
+path_style = true
+
+[storage.s3.redirect]
+enabled = true
+public_endpoint = "http://localhost:9000"
+expires_secs = 900
+
+[raft]
+listen = "0.0.0.0:5051"
+data_dir = "/tmp/raft"
+discovery_dns = "orb-chrysa"

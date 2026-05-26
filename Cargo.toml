@@ -1,0 +1,63 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/orb-chrysa-server",
+    "crates/orb-chrysa-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/adamcavendish/orb-chrysa"
+
+[workspace.dependencies]
+tokio = "1"
+serde = "1"
+serde_urlencoded = "0.7"
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+thiserror = "2"
+uuid = "1"
+sha2 = "0.11"
+hex = "0.4"
+bytes = "1"
+axum = "0.8"
+tower = { version = "0.5", features = ["limit"] }
+tower-http = "0.6"
+async-trait = "0.1"
+toml = "1"
+tokio-util = "0.7"
+futures = "0.3"
+aws-sdk-s3 = "1"
+aws-config = "1"
+aws-credential-types = "1"
+aws-types = "1"
+clap = "4"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+aioduct = { version = "0.2.0-alpha.4", features = ["tokio", "rustls", "rustls-ring", "json"] }
+http = "1"
+hyper = "1"
+http-body-util = "0.1"
+tempfile = "3"
+openraft = { version = "0.9", features = ["serde", "generic-snapshot-data", "storage-v2"] }
+redb = "4"
+tonic = "0.14"
+prost = "0.14"
+postcard = { version = "1", features = ["alloc"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+rust-embed = "8"
+walkdir = "2"
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+base64 = "0.22"
+aes-gcm = "0.10"
+rand = "0.10"
+rcgen = "0.14"
+time = "0.3"
+httpmock = "0.7"
+
+[profile.release]
+panic = "abort"

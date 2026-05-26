@@ -1,0 +1,44 @@
+{{- if .Values.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "orb-chrysa.fullname" . }}-server
+  namespace: {{ include "orb-chrysa.namespace" . }}
+spec:
+  secretName: {{ .Values.server.tls.existingSecret }}
+  issuerRef:
+    name: {{ required "certManager.issuerRef.name is required when certManager.enabled=true" .Values.certManager.issuerRef.name }}
+    kind: {{ .Values.certManager.issuerRef.kind }}
+    group: {{ .Values.certManager.issuerRef.group }}
+  dnsNames:
+    - {{ include "orb-chrysa.fullname" . }}.{{ include "orb-chrysa.namespace" . }}.svc
+    - {{ include "orb-chrysa.fullname" . }}.{{ include "orb-chrysa.namespace" . }}.svc.cluster.local
+    {{- range .Values.server.tls.dnsNames }}
+    - {{ . | quote }}
+    {{- end }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "orb-chrysa.fullname" . }}-raft
+  namespace: {{ include "orb-chrysa.namespace" . }}
+spec:
+  secretName: {{ .Values.raft.tls.existingSecret }}
+  issuerRef:
+    name: {{ required "certManager.issuerRef.name is required when certManager.enabled=true" .Values.certManager.issuerRef.name }}
+    kind: {{ .Values.certManager.issuerRef.kind }}
+    group: {{ .Values.certManager.issuerRef.group }}
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+    - {{ include "orb-chrysa.fullname" . }}-headless
+    - {{ include "orb-chrysa.fullname" . }}-headless.{{ include "orb-chrysa.namespace" . }}.svc
+    - "*.{{ include "orb-chrysa.fullname" . }}-headless"
+    - "*.{{ include "orb-chrysa.fullname" . }}-headless.{{ include "orb-chrysa.namespace" . }}.svc"
+    - "*.{{ include "orb-chrysa.fullname" . }}-headless.{{ include "orb-chrysa.namespace" . }}.svc.cluster.local"
+    {{- range $i := until (int .Values.replicaCount) }}
+    - {{ include "orb-chrysa.fullname" $ }}-{{ $i }}.{{ include "orb-chrysa.fullname" $ }}-headless.{{ include "orb-chrysa.namespace" $ }}.svc
+    - {{ include "orb-chrysa.fullname" $ }}-{{ $i }}.{{ include "orb-chrysa.fullname" $ }}-headless.{{ include "orb-chrysa.namespace" $ }}.svc.cluster.local
+    {{- end }}
+{{- end }}

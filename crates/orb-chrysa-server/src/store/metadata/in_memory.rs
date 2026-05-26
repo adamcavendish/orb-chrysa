@@ -1,0 +1,805 @@
+use super::{traits::*, types::*};
+use crate::error::OrbChrysaError;
+use crate::oci::digest::Digest;
+use async_trait::async_trait;
+use std::collections::BTreeMap;
+
+// re-exported via super::types::*
+
+#[cfg(test)]
+#[derive(Debug, Default, Clone)]
+pub struct InMemoryMetadataStore {
+    inner: std::sync::Arc<tokio::sync::RwLock<InMemoryState>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default, Clone)]
+struct InMemoryState {
+    manifests: BTreeMap<String, BTreeMap<String, ManifestEntry>>,
+    tags: BTreeMap<String, BTreeMap<String, Digest>>,
+    blob_ref_counts: BTreeMap<String, u64>,
+    blob_delete_requests: BTreeMap<String, u64>,
+    mirror_rules: BTreeMap<String, MirrorRule>,
+    proxy_caches: BTreeMap<String, ProxyCache>,
+    warm_images: BTreeMap<String, WarmImage>,
+    sync_jobs: BTreeMap<String, SyncJob>,
+    sync_job_runs: BTreeMap<String, Vec<SyncJobRun>>,
+    personal_access_tokens: BTreeMap<String, PersonalAccessToken>,
+}
+
+#[cfg(test)]
+impl InMemoryState {
+    fn increment_blob_refs(&mut self, entry: &ManifestEntry) {
+        for digest in unique_blob_refs(&entry.referenced_blobs) {
+            *self.blob_ref_counts.entry(digest).or_default() += 1;
+        }
+    }
+
+    fn decrement_blob_refs(&mut self, entry: &ManifestEntry) {
+        for digest in unique_blob_refs(&entry.referenced_blobs) {
+            if let Some(count) = self.blob_ref_counts.get_mut(&digest) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.blob_ref_counts.remove(&digest);
+                }
+            }
+        }
+    }
+}
+
+/// Sort and deduplicate a list of digest strings.
+#[allow(dead_code)]
+pub(crate) fn unique_blob_refs(digests: &[Digest]) -> Vec<String> {
+    let mut refs: Vec<String> = digests.iter().map(ToString::to_string).collect();
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+#[cfg(test)]
+#[async_trait]
+impl ManifestStore for InMemoryMetadataStore {
+    async fn get_manifest(
+        &self,
+        name: &str,
+        reference: &str,
+    ) -> Result<Option<ManifestEntry>, OrbChrysaError> {
+        let state = self.inner.read().await;
+
+        if let Some(digest) = reference
+            .strip_prefix("sha256:")
+            .or_else(|| reference.strip_prefix("sha512:"))
+        {
+            let _ = digest;
+            if let Some(repo_manifests) = state.manifests.get(name) {
+                return Ok(repo_manifests.get(reference).cloned());
+            }
+            return Ok(None);
+        }
+
+        if let Some(repo_tags) = state.tags.get(name)
+            && let Some(digest) = repo_tags.get(reference)
+            && let Some(repo_manifests) = state.manifests.get(name)
+        {
+            return Ok(repo_manifests.get(&digest.to_string()).cloned());
+        }
+        Ok(None)
+    }
+
+    async fn put_manifest(
+        &self,
+        name: &str,
+        reference: &str,
+        entry: ManifestEntry,
+    ) -> Result<(), OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        let digest_str = entry.digest.to_string();
+        let digest = entry.digest.clone();
+
+        let previous = state
+            .manifests
+            .entry(name.to_string())
+            .or_default()
+            .insert(digest_str.clone(), entry.clone());
+        if let Some(previous) = previous {
+            state.decrement_blob_refs(&previous);
+        }
+        state.increment_blob_refs(&entry);
+
+        let is_digest = reference.contains(':');
+        if !is_digest {
+            state
+                .tags
+                .entry(name.to_string())
+                .or_default()
+                .insert(reference.to_string(), digest);
+        }
+
+        Ok(())
+    }
+
+    async fn delete_manifest(&self, name: &str, digest: &Digest) -> Result<(), OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        let digest_str = digest.to_string();
+
+        if let Some(repo_manifests) = state.manifests.get_mut(name)
+            && let Some(entry) = repo_manifests.remove(&digest_str)
+        {
+            state.decrement_blob_refs(&entry);
+        }
+
+        if let Some(repo_tags) = state.tags.get_mut(name) {
+            repo_tags.retain(|_, d| d.to_string() != digest_str);
+        }
+
+        Ok(())
+    }
+
+    async fn list_tags(
+        &self,
+        name: &str,
+        n: Option<usize>,
+        last: Option<&str>,
+    ) -> Result<Vec<String>, OrbChrysaError> {
+        let state = self.inner.read().await;
+        let Some(repo_tags) = state.tags.get(name) else {
+            return Ok(Vec::new());
+        };
+
+        let mut tags: Vec<String> = if let Some(last) = last {
+            repo_tags
+                .keys()
+                .filter(|k| k.as_str() > last)
+                .cloned()
+                .collect()
+        } else {
+            repo_tags.keys().cloned().collect()
+        };
+
+        tags.sort();
+        if let Some(n) = n {
+            tags.truncate(n);
+        }
+        Ok(tags)
+    }
+
+    async fn list_repositories(
+        &self,
+        n: Option<usize>,
+        last: Option<&str>,
+    ) -> Result<Vec<String>, OrbChrysaError> {
+        let state = self.inner.read().await;
+        let mut repos: Vec<String> = if let Some(last) = last {
+            state
+                .manifests
+                .keys()
+                .filter(|k| k.as_str() > last)
+                .cloned()
+                .collect()
+        } else {
+            state.manifests.keys().cloned().collect()
+        };
+
+        repos.sort();
+        if let Some(n) = n {
+            repos.truncate(n);
+        }
+        Ok(repos)
+    }
+
+    async fn list_repository_summaries(&self) -> Result<Vec<RepositorySummary>, OrbChrysaError> {
+        let state = self.inner.read().await;
+        let mut summaries = Vec::new();
+
+        for (name, repo_manifests) in &state.manifests {
+            let tag_count = state.tags.get(name).map(|t| t.len()).unwrap_or(0);
+            let size_bytes = repo_manifests.values().map(|m| m.size_bytes).sum();
+            let last_modified = repo_manifests
+                .values()
+                .map(|m| m.last_modified)
+                .max()
+                .unwrap_or(0);
+            summaries.push(RepositorySummary {
+                name: name.clone(),
+                tag_count,
+                manifest_count: repo_manifests.len(),
+                size_bytes,
+                last_modified,
+            });
+        }
+
+        Ok(summaries)
+    }
+
+    async fn list_manifest_summaries(
+        &self,
+        name: &str,
+    ) -> Result<Vec<ManifestSummary>, OrbChrysaError> {
+        let state = self.inner.read().await;
+        let Some(repo_manifests) = state.manifests.get(name) else {
+            return Ok(Vec::new());
+        };
+        let tag_strings: Option<std::collections::BTreeMap<String, String>> =
+            state.tags.get(name).map(|tags| {
+                tags.iter()
+                    .map(|(k, v)| (k.clone(), v.to_string()))
+                    .collect()
+            });
+        Ok(build_manifest_summaries(
+            repo_manifests,
+            tag_strings.as_ref(),
+        ))
+    }
+
+    async fn delete_tag(
+        &self,
+        name: &str,
+        digest: &Digest,
+        tag: &str,
+    ) -> Result<bool, OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        let Some(repo_tags) = state.tags.get_mut(name) else {
+            return Ok(false);
+        };
+        let matches = repo_tags
+            .get(tag)
+            .map(|existing| existing.to_string() == digest.to_string())
+            .unwrap_or(false);
+        if matches {
+            repo_tags.remove(tag);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn delete_repository(&self, name: &str) -> Result<DeleteCounts, OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        let removed = state.manifests.remove(name);
+        if let Some(manifests) = removed.as_ref() {
+            for entry in manifests.values() {
+                state.decrement_blob_refs(entry);
+            }
+        }
+        let deleted_manifests = removed.map(|m| m.len()).unwrap_or(0);
+        let deleted_tags = state.tags.remove(name).map(|t| t.len()).unwrap_or(0);
+        Ok(DeleteCounts {
+            deleted_manifests,
+            deleted_tags,
+        })
+    }
+
+    async fn delete_manifests(
+        &self,
+        name: &str,
+        digests: &[Digest],
+    ) -> Result<DeleteCounts, OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        let digest_set: std::collections::BTreeSet<String> =
+            digests.iter().map(ToString::to_string).collect();
+        let mut deleted_manifests = 0;
+        let mut deleted_tags = 0;
+
+        let mut removed = Vec::new();
+        if let Some(repo_manifests) = state.manifests.get_mut(name) {
+            for digest in &digest_set {
+                if let Some(entry) = repo_manifests.remove(digest) {
+                    removed.push(entry);
+                    deleted_manifests += 1;
+                }
+            }
+        }
+        for entry in &removed {
+            state.decrement_blob_refs(entry);
+        }
+
+        if let Some(repo_tags) = state.tags.get_mut(name) {
+            let before = repo_tags.len();
+            repo_tags.retain(|_, digest| !digest_set.contains(&digest.to_string()));
+            deleted_tags = before.saturating_sub(repo_tags.len());
+        }
+
+        Ok(DeleteCounts {
+            deleted_manifests,
+            deleted_tags,
+        })
+    }
+
+    async fn list_referrers(
+        &self,
+        name: &str,
+        subject_digest: &Digest,
+        artifact_type: Option<&str>,
+    ) -> Result<Vec<ReferrerEntry>, OrbChrysaError> {
+        let state = self.inner.read().await;
+        let Some(repo_manifests) = state.manifests.get(name) else {
+            return Ok(Vec::new());
+        };
+
+        let subject_str = subject_digest.to_string();
+        let mut entries = Vec::new();
+
+        for entry in repo_manifests.values() {
+            if entry.subject.as_ref().map(|d| d.to_string()) == Some(subject_str.clone()) {
+                let re = ReferrerEntry {
+                    digest: entry.digest.clone(),
+                    media_type: entry.content_type.clone(),
+                    size: entry.body.len() as u64,
+                    artifact_type: entry.artifact_type.clone(),
+                    annotations: entry.annotations.clone(),
+                };
+
+                if let Some(filter) = artifact_type {
+                    if re.artifact_type.as_deref() == Some(filter) {
+                        entries.push(re);
+                    }
+                } else {
+                    entries.push(re);
+                }
+            }
+        }
+
+        Ok(entries)
+    }
+
+    async fn mount_blob(
+        &self,
+        _source_repo: &str,
+        _dest_repo: &str,
+        _digest: &Digest,
+    ) -> Result<(), OrbChrysaError> {
+        Ok(())
+    }
+
+    async fn record_blob_delete_request(
+        &self,
+        digest: &Digest,
+    ) -> Result<BlobDeleteStatus, OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        let digest = digest.to_string();
+        let ref_count = state.blob_ref_counts.get(&digest).copied().unwrap_or(0);
+        state
+            .blob_delete_requests
+            .insert(digest.clone(), now_epoch());
+        Ok(BlobDeleteStatus {
+            digest,
+            referenced: ref_count > 0,
+            ref_count,
+        })
+    }
+
+    async fn blob_lifecycle_status(
+        &self,
+        digest: &Digest,
+    ) -> Result<BlobLifecycleStatus, OrbChrysaError> {
+        let state = self.inner.read().await;
+        let digest = digest.to_string();
+        let ref_count = state.blob_ref_counts.get(&digest).copied().unwrap_or(0);
+        Ok(BlobLifecycleStatus {
+            delete_requested: state.blob_delete_requests.contains_key(&digest),
+            digest,
+            referenced: ref_count > 0,
+            ref_count,
+        })
+    }
+
+    async fn clear_blob_delete_request(&self, digest: &Digest) -> Result<(), OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        state.blob_delete_requests.remove(&digest.to_string());
+        Ok(())
+    }
+
+    async fn blob_ref_counts(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, u64>, OrbChrysaError> {
+        let state = self.inner.read().await;
+        Ok(state.blob_ref_counts.clone())
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl MirrorConfigStore for InMemoryMetadataStore {
+    // Mirror rule CRUD
+
+    async fn list_mirror_rules(&self) -> Result<Vec<MirrorRule>, OrbChrysaError> {
+        let state = self.inner.read().await;
+        Ok(state.mirror_rules.values().cloned().collect())
+    }
+
+    async fn get_mirror_rule(&self, id: &str) -> Result<Option<MirrorRule>, OrbChrysaError> {
+        let state = self.inner.read().await;
+        Ok(state.mirror_rules.get(id).cloned())
+    }
+
+    async fn put_mirror_rule(&self, rule: MirrorRule) -> Result<(), OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        state.mirror_rules.insert(rule.id.clone(), rule);
+        Ok(())
+    }
+
+    async fn delete_mirror_rule(&self, id: &str) -> Result<(), OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        state.mirror_rules.remove(id);
+        Ok(())
+    }
+
+    async fn trigger_mirror_rule(&self, id: &str) -> Result<Option<SyncJob>, OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        let Some(rule) = state.mirror_rules.get(id).cloned() else {
+            return Ok(None);
+        };
+        let now = now_epoch();
+        if state
+            .sync_jobs
+            .values()
+            .any(|job| sync_job_blocks_trigger(job, SyncJobKind::Mirror, id, now))
+        {
+            return Err(OrbChrysaError::Conflict(
+                "Rule is already running".to_string(),
+            ));
+        }
+
+        let job = mirror_rule_job(&rule, format!("{}-{}", rule.id, now), now, 0);
+        state.sync_jobs.insert(job.id.clone(), job.clone());
+        Ok(Some(job))
+    }
+
+    async fn list_proxy_caches(&self) -> Result<Vec<ProxyCache>, OrbChrysaError> {
+        let state = self.inner.read().await;
+        Ok(state.proxy_caches.values().cloned().collect())
+    }
+
+    async fn get_proxy_cache(&self, id: &str) -> Result<Option<ProxyCache>, OrbChrysaError> {
+        let state = self.inner.read().await;
+        Ok(state.proxy_caches.get(id).cloned())
+    }
+
+    async fn put_proxy_cache(&self, cache: ProxyCache) -> Result<(), OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        state.proxy_caches.insert(cache.id.clone(), cache);
+        Ok(())
+    }
+
+    async fn delete_proxy_cache(&self, id: &str) -> Result<(), OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        state.proxy_caches.remove(id);
+        Ok(())
+    }
+
+    async fn trigger_proxy_cache_warm(&self, id: &str) -> Result<Option<SyncJob>, OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        let Some(cache) = state.proxy_caches.get(id).cloned() else {
+            return Ok(None);
+        };
+        let now = now_epoch();
+        if state
+            .sync_jobs
+            .values()
+            .any(|job| sync_job_blocks_trigger(job, SyncJobKind::ProxyCache, id, now))
+        {
+            return Err(OrbChrysaError::Conflict(
+                "Proxy cache warm-up is already running".to_string(),
+            ));
+        }
+
+        let job = proxy_cache_warm_job(&cache, now);
+        state.sync_jobs.insert(job.id.clone(), job.clone());
+        Ok(Some(job))
+    }
+
+    // Warm image CRUD
+
+    async fn list_warm_images(&self) -> Result<Vec<WarmImage>, OrbChrysaError> {
+        let state = self.inner.read().await;
+        Ok(state.warm_images.values().cloned().collect())
+    }
+
+    async fn get_warm_image(&self, id: &str) -> Result<Option<WarmImage>, OrbChrysaError> {
+        let state = self.inner.read().await;
+        Ok(state.warm_images.get(id).cloned())
+    }
+
+    async fn put_warm_image(&self, image: WarmImage) -> Result<(), OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        state.warm_images.insert(image.id.clone(), image);
+        Ok(())
+    }
+
+    async fn delete_warm_image(&self, id: &str) -> Result<(), OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        state.warm_images.remove(id);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl JobStore for InMemoryMetadataStore {
+    // Sync jobs
+
+    async fn list_sync_jobs(&self) -> Result<Vec<SyncJob>, OrbChrysaError> {
+        let state = self.inner.read().await;
+        Ok(state.sync_jobs.values().cloned().collect())
+    }
+
+    async fn get_sync_job(&self, id: &str) -> Result<Option<SyncJob>, OrbChrysaError> {
+        let state = self.inner.read().await;
+        Ok(state.sync_jobs.get(id).cloned())
+    }
+
+    async fn put_sync_job(&self, job: SyncJob) -> Result<(), OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        state.sync_jobs.insert(job.id.clone(), job);
+        Ok(())
+    }
+
+    async fn delete_sync_job(&self, id: &str) -> Result<(), OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        state.sync_jobs.remove(id);
+        state.sync_job_runs.remove(id);
+        Ok(())
+    }
+
+    async fn claim_sync_job(&self, id: &str, node_id: &str) -> Result<bool, OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        let Some(job) = state.sync_jobs.get_mut(id) else {
+            return Ok(false);
+        };
+        if job.status != SyncJobStatus::Idle {
+            return Ok(false);
+        }
+        job.status = SyncJobStatus::Running;
+        job.claimed_by = Some(node_id.to_string());
+        job.claimed_at = Some(now_epoch());
+        Ok(true)
+    }
+
+    async fn trigger_sync_job(&self, id: &str) -> Result<bool, OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        let Some(job) = state.sync_jobs.get_mut(id) else {
+            return Ok(false);
+        };
+        if job.status == SyncJobStatus::Running {
+            return Ok(false);
+        }
+        job.status = SyncJobStatus::Idle;
+        job.claimed_by = None;
+        job.claimed_at = None;
+        job.last_error = None;
+        job.next_run_at = now_epoch();
+        Ok(true)
+    }
+
+    // Sync job runs
+
+    async fn list_sync_job_runs(
+        &self,
+        job_id: &str,
+        limit: usize,
+    ) -> Result<Vec<SyncJobRun>, OrbChrysaError> {
+        let state = self.inner.read().await;
+        let runs = state.sync_job_runs.get(job_id).cloned().unwrap_or_default();
+        let start = runs.len().saturating_sub(limit);
+        Ok(runs[start..].to_vec())
+    }
+
+    async fn put_sync_job_run(&self, run: SyncJobRun) -> Result<(), OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        let runs = state.sync_job_runs.entry(run.job_id.clone()).or_default();
+        if let Some(pos) = runs.iter().position(|r| r.id == run.id) {
+            runs[pos] = run;
+        } else {
+            runs.push(run);
+            if runs.len() > 50 {
+                let excess = runs.len() - 50;
+                runs.drain(..excess);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl HelmStore for InMemoryMetadataStore {
+    async fn list_helm_charts(&self) -> Result<Vec<HelmChart>, OrbChrysaError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_helm_chart_versions(
+        &self,
+        _name: &str,
+    ) -> Result<Option<Vec<HelmChartVersion>>, OrbChrysaError> {
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl TokenStore for InMemoryMetadataStore {
+    // Personal Access Tokens
+
+    async fn list_personal_access_tokens(
+        &self,
+        subject: &str,
+    ) -> Result<Vec<PersonalAccessToken>, OrbChrysaError> {
+        let state = self.inner.read().await;
+        Ok(state
+            .personal_access_tokens
+            .values()
+            .filter(|t| t.subject == subject)
+            .cloned()
+            .collect())
+    }
+
+    async fn get_personal_access_token_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<PersonalAccessToken>, OrbChrysaError> {
+        let state = self.inner.read().await;
+        Ok(state
+            .personal_access_tokens
+            .values()
+            .find(|t| t.token_hash == token_hash)
+            .cloned())
+    }
+
+    async fn put_personal_access_token(
+        &self,
+        token: PersonalAccessToken,
+    ) -> Result<(), OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        state.personal_access_tokens.insert(token.id.clone(), token);
+        Ok(())
+    }
+
+    async fn delete_personal_access_token(
+        &self,
+        id: &str,
+        subject: &str,
+    ) -> Result<bool, OrbChrysaError> {
+        let mut state = self.inner.write().await;
+        let should_delete = state
+            .personal_access_tokens
+            .get(id)
+            .map(|t| t.subject == subject)
+            .unwrap_or(false);
+        if should_delete {
+            state.personal_access_tokens.remove(id);
+        }
+        Ok(should_delete)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn inmemory_get_manifest() {
+        shared_read_tests::assert_get_manifest(&InMemoryMetadataStore::default()).await;
+    }
+
+    #[tokio::test]
+    async fn inmemory_list_tags() {
+        shared_read_tests::assert_list_tags(&InMemoryMetadataStore::default()).await;
+    }
+
+    #[tokio::test]
+    async fn inmemory_list_repositories() {
+        shared_read_tests::assert_list_repositories(&InMemoryMetadataStore::default()).await;
+    }
+
+    #[tokio::test]
+    async fn inmemory_list_manifest_summaries() {
+        shared_read_tests::assert_list_manifest_summaries(&InMemoryMetadataStore::default()).await;
+    }
+}
+
+// ── Shared read tests ─────────────────────────────────────────────────
+// Parameterized tests that verify both InMemoryMetadataStore and
+// StateMachineData produce identical results for the same seed data.
+// Callers seed the store then invoke these shared assertion functions.
+
+#[cfg(test)]
+pub(crate) mod shared_read_tests {
+    use super::*;
+
+    /// Seed a manifest and tag, returning the entry and digest for assertions.
+    pub(crate) fn seed_entry() -> (ManifestEntry, String) {
+        let digest_str = format!("sha256:{:064x}", 1u64);
+        let digest = Digest::from_str_checked(&digest_str).unwrap();
+        let entry = ManifestEntry {
+            digest: digest.clone(),
+            content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+            body: br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[]}"#.to_vec(),
+            referenced_blobs: vec![],
+            subject: None,
+            artifact_type: None,
+            annotations: None,
+            size_bytes: 200,
+            created_at: 100,
+            last_modified: 200,
+            config_summary: None,
+        };
+        (entry, digest_str)
+    }
+
+    /// Shared assertions for get_manifest — takes any ManifestStore impl.
+    pub(crate) async fn assert_get_manifest<M: ManifestStore>(store: &M) {
+        let (entry, digest_str) = seed_entry();
+        store
+            .put_manifest("shared-repo", "v1", entry.clone())
+            .await
+            .unwrap();
+
+        // Lookup by tag
+        let found = store.get_manifest("shared-repo", "v1").await.unwrap();
+        assert!(found.is_some(), "manifest should be found by tag");
+        assert_eq!(found.unwrap().digest, entry.digest);
+
+        // Lookup by digest
+        let found = store
+            .get_manifest("shared-repo", &digest_str)
+            .await
+            .unwrap();
+        assert!(found.is_some(), "manifest should be found by digest");
+
+        // Unknown reference
+        let found = store
+            .get_manifest("shared-repo", "nonexistent")
+            .await
+            .unwrap();
+        assert!(found.is_none(), "unknown reference should return None");
+    }
+
+    /// Shared assertions for list_tags
+    pub(crate) async fn assert_list_tags<M: ManifestStore>(store: &M) {
+        let (entry, _) = seed_entry();
+        store
+            .put_manifest("shared-repo", "v1", entry.clone())
+            .await
+            .unwrap();
+        store
+            .put_manifest("shared-repo", "v2", entry)
+            .await
+            .unwrap();
+
+        let tags = store.list_tags("shared-repo", None, None).await.unwrap();
+        assert_eq!(tags, vec!["v1", "v2"]);
+
+        let tags = store.list_tags("nonexistent", None, None).await.unwrap();
+        assert!(tags.is_empty());
+    }
+
+    /// Shared assertions for list_repositories
+    pub(crate) async fn assert_list_repositories<M: ManifestStore>(store: &M) {
+        let (entry, _) = seed_entry();
+        store
+            .put_manifest("repo-a", "latest", entry.clone())
+            .await
+            .unwrap();
+        store.put_manifest("repo-b", "latest", entry).await.unwrap();
+
+        let repos = store.list_repositories(None, None).await.unwrap();
+        assert_eq!(repos, vec!["repo-a", "repo-b"]);
+    }
+
+    /// Shared assertions for list_manifest_summaries
+    pub(crate) async fn assert_list_manifest_summaries<M: ManifestStore>(store: &M) {
+        let (entry, _) = seed_entry();
+        store
+            .put_manifest("shared-repo", "v1", entry)
+            .await
+            .unwrap();
+
+        let summaries = store.list_manifest_summaries("shared-repo").await.unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].tags, vec!["v1"]);
+        assert_eq!(
+            summaries[0].media_type,
+            "application/vnd.oci.image.manifest.v1+json"
+        );
+    }
+}

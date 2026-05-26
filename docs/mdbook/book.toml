@@ -1,0 +1,15 @@
+[book]
+authors = ["orb-chrysa contributors"]
+language = "en"
+src = "src"
+title = "orb-chrysa Documentation"
+
+[build]
+create-missing = true
+
+[output.html]
+edit-url-template = "https://github.com/adamcavendish/orb-chrysa/edit/master/docs/mdbook/{path}"
+git-repository-url = "https://github.com/adamcavendish/orb-chrysa"
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

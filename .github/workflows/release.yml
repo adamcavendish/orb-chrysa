@@ -1,0 +1,175 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: adamcavendish/orb-chrysa-server
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install just
+        uses: taiki-e/install-action@just
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install mdbook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: 'latest'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl libssl-dev pkg-config
+
+      - name: Install mdbook-mermaid
+        run: cargo install --locked mdbook-mermaid
+
+      - name: Install dashboard toolchain
+        env:
+          VP_HOME: /opt/vite-plus
+          VP_NODE_MANAGER: "yes"
+          VP_NODE_VERSION: "24.15.0"
+          NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
+          npm_config_registry: https://registry.npmmirror.com
+        run: |
+          {
+            echo "VP_HOME=$VP_HOME"
+            echo "VP_NODE_MANAGER=$VP_NODE_MANAGER"
+            echo "VP_NODE_VERSION=$VP_NODE_VERSION"
+            echo "NPM_CONFIG_REGISTRY=$NPM_CONFIG_REGISTRY"
+            echo "npm_config_registry=$npm_config_registry"
+          } >> "$GITHUB_ENV"
+          sudo mkdir -p "$VP_HOME"
+          sudo chown -R "$USER:$USER" "$VP_HOME"
+          echo "$VP_HOME/bin" >> "$GITHUB_PATH"
+          export PATH="$VP_HOME/bin:$PATH"
+          echo "registry=https://registry.npmmirror.com" > .npmrc
+          curl -fsSL https://vite.plus | bash
+          cp .npmrc crates/orb-chrysa-server/dashboard/.npmrc
+          cd crates/orb-chrysa-server/dashboard
+          vp install
+          vp --version
+          node --version
+
+      - name: CI gate
+        run: just check
+
+      - name: Helm chart gate
+        run: just helm-check
+
+      - name: Docs gate
+        run: just docs-check
+
+  image:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  cli:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build CLI
+        run: cargo build --release -p orb-chrysa-cli --target ${{ matrix.target }}
+
+      - name: Package CLI
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/orb-chrysa-cli dist/orb-chrysa-cli-${{ matrix.target }}
+          shasum -a 256 dist/orb-chrysa-cli-${{ matrix.target }} > dist/orb-chrysa-cli-${{ matrix.target }}.sha256
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+
+  chart:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Package Helm chart
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          helm package deploy/kubernetes/helm --version "$VERSION" --app-version "$VERSION" --destination dist
+          CHART="dist/orb-chrysa-$VERSION.tgz"
+          test -s "$CHART"
+          tar -xOf "$CHART" orb-chrysa/Chart.yaml > dist/Chart.yaml
+          grep -q "^version: $VERSION$" dist/Chart.yaml
+          grep -q "^appVersion: $VERSION$" dist/Chart.yaml
+          helm template orb-chrysa "$CHART" \
+            --namespace orb-chrysa \
+            -f deploy/kubernetes/helm/test-values/minimal.yaml \
+            > dist/render-default.yaml
+          grep -q "image: \"ghcr.io/adamcavendish/orb-chrysa-server:$VERSION\"" dist/render-default.yaml
+          helm template orb-chrysa "$CHART" \
+            --namespace orb-chrysa \
+            -f deploy/kubernetes/helm/test-values/minimal.yaml \
+            --set image.tag=tilt \
+            > dist/render-override.yaml
+          grep -q 'image: "ghcr.io/adamcavendish/orb-chrysa-server:tilt"' dist/render-override.yaml
+
+      - name: Upload chart release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tgz

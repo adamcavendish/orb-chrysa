@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "orb-chrysa.fullname" . }}-config
+  namespace: {{ include "orb-chrysa.namespace" . }}
+  labels:
+    {{- include "orb-chrysa.labels" . | nindent 4 }}
+data:
+  config.toml.tpl: |
+    [server]
+    listen = "0.0.0.0:5050"
+
+    [server.limits]
+    max_concurrent_uploads = 64
+    max_concurrent_requests = 512
+
+    [server.tls]
+    cert_path = "/etc/orb-chrysa/tls/tls.crt"
+    key_path = "/etc/orb-chrysa/tls/tls.key"
+
+    [storage.s3]
+    endpoint = {{ required "storage.s3.endpoint is required" .Values.storage.s3.endpoint | quote }}
+    bucket = {{ required "storage.s3.bucket is required" .Values.storage.s3.bucket | quote }}
+    region = {{ .Values.storage.s3.region | quote }}
+    access_key = "__S3_ACCESS_KEY__"
+    secret_key = "__S3_SECRET_KEY__"
+    path_style = {{ .Values.storage.s3.pathStyle }}
+
+    [storage.s3.redirect]
+    enabled = {{ .Values.storage.s3.redirect.enabled }}
+    public_endpoint = {{ .Values.storage.s3.redirect.publicEndpoint | quote }}
+    expires_secs = {{ .Values.storage.s3.redirect.expiresSecs }}
+
+    [raft]
+    listen = "0.0.0.0:5051"
+    data_dir = "/tmp/raft"
+    discovery_dns = "{{ include "orb-chrysa.fullname" . }}-headless"
+
+    [raft.tls]
+    cert_path = "/etc/orb-chrysa/raft-tls/tls.crt"
+    key_path = "/etc/orb-chrysa/raft-tls/tls.key"
+    server_ca_path = "/etc/orb-chrysa/raft-tls/server-ca.crt"
+    client_ca_path = "/etc/orb-chrysa/raft-tls/client-ca.crt"
+
+    [raft.kubernetes]
+    enabled = {{ .Values.raft.kubernetes.enabled }}
+    namespace = {{ include "orb-chrysa.namespace" . | quote }}
+    statefulset_name = {{ default (include "orb-chrysa.fullname" .) .Values.raft.kubernetes.statefulSetName | quote }}
+    reconcile_seconds = {{ .Values.raft.kubernetes.reconcileSeconds }}
+    {{- if .Values.auth.enabled }}
+
+    [auth]
+    issuer_url = {{ .Values.auth.issuerUrl | quote }}
+    issuer_internal_url = {{ .Values.auth.issuerInternalUrl | quote }}
+    issuer_internal_urls = {{ toJson .Values.auth.issuerInternalUrls }}
+    jwks_urls = {{ toJson .Values.auth.jwksUrls }}
+    client_id = {{ .Values.auth.clientId | quote }}
+    client_secret = "__AUTH_CLIENT_SECRET__"
+    token_endpoint_url = {{ .Values.auth.tokenEndpointUrl | quote }}
+    redirect_uri = {{ .Values.auth.redirectUri | quote }}
+    tls_insecure_skip_verify = {{ .Values.auth.tlsInsecureSkipVerify }}
+    jwks_refresh_seconds = {{ .Values.auth.jwksRefreshSeconds }}
+    jwks_cache_s3_key = {{ .Values.auth.jwksCacheS3Key | quote }}
+    jwks_max_stale_seconds = {{ .Values.auth.jwksMaxStaleSeconds }}
+    token_signing_keys = __AUTH_TOKEN_SIGNING_KEYS__
+    session_encryption_key = "__AUTH_SESSION_ENCRYPTION_KEY__"
+    {{- range .Values.auth.permissions }}
+
+    [[auth.permissions]]
+    name = {{ .name | quote }}
+    groups = {{ toJson .groups }}
+    scopes = {{ toJson .scopes }}
+    {{- end }}
+    {{- end }}

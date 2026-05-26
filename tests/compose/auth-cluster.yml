@@ -1,0 +1,159 @@
+name: orb-chrysa-auth-cluster
+
+services:
+  rustfs:
+    image: rustfs/rustfs:1.0.0-beta.6
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+      RUSTFS_ADDRESS: "0.0.0.0:9000"
+      RUSTFS_CONSOLE_ADDRESS: "0.0.0.0:9001"
+      RUSTFS_VOLUMES: /data
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  rustfs-init:
+    image: rustfs/rc:latest
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment:
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+    entrypoint: >
+      /bin/sh -c "
+      RUSTFS_IP=$$(getent hosts rustfs | awk '{print $$1}');
+      rc alias set local http://$$RUSTFS_IP:9000 $$RUSTFS_ACCESS_KEY $$RUSTFS_SECRET_KEY;
+      rc bucket create local/orb-chrysa -p;
+      "
+    restart: "no"
+
+  cert-init:
+    image: alpine:3.21
+    entrypoint: >
+      /bin/sh -c "
+      apk add --no-cache openssl &&
+      mkdir -p /certs &&
+      openssl req -x509 -newkey rsa:4096 -keyout /certs/key.pem -out /certs/cert.pem -days 365 -nodes -subj '/CN=kanidm' &&
+      cat /certs/cert.pem /certs/key.pem > /certs/chain.pem &&
+      chmod 644 /certs/*.pem &&
+      echo 'TLS certificates generated'
+      "
+    volumes:
+      - certs:/certs
+    restart: "no"
+
+  kanidm:
+    image: kanidm/server:1.10.3
+    ports:
+      - "8443:8443"
+    volumes:
+      - ../../tests/compose/config/kanidm-server.toml:/data/server.toml:ro
+      - certs:/certs:ro
+      - kanidm-data:/data
+    depends_on:
+      cert-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "kanidmd", "scripting", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  kanidm-setup:
+    build:
+      context: ../..
+      dockerfile: tests/compose/kanidm/kanidm-init.Dockerfile
+    volumes:
+      - kanidm-data:/data
+      - ../../tests/compose/config/kanidm-server.toml:/config/server.toml:ro
+      - ../../tests/compose/config/auth-cluster.toml:/templates/auth-cluster.toml:ro
+      - ../../tests/compose/kanidm/kanidm-setup.sh:/scripts/kanidm-setup.sh:ro
+      - shared-config:/shared
+    environment:
+      KANIDM_CONFIG: /config/server.toml
+    entrypoint: ["/bin/bash", "/scripts/kanidm-setup.sh"]
+    depends_on:
+      kanidm:
+        condition: service_healthy
+    restart: "no"
+
+  orb-chrysa-0:
+    build:
+      context: ../..
+    hostname: orb-chrysa-0
+    ports:
+      - "5050:5050"
+    environment:
+      HOSTNAME: orb-chrysa-0
+    volumes:
+      - shared-config:/etc/orb-chrysa:ro
+    command: ["--config", "/etc/orb-chrysa/auth-cluster.toml"]
+    depends_on:
+      kanidm-setup:
+        condition: service_completed_successfully
+      rustfs-init:
+        condition: service_completed_successfully
+    networks:
+      default:
+        aliases:
+          - orb-chrysa
+
+  orb-chrysa-1:
+    build:
+      context: ../..
+    hostname: orb-chrysa-1
+    ports:
+      - "5051:5050"
+    environment:
+      HOSTNAME: orb-chrysa-1
+    volumes:
+      - shared-config:/etc/orb-chrysa:ro
+    command: ["--config", "/etc/orb-chrysa/auth-cluster.toml"]
+    depends_on:
+      kanidm-setup:
+        condition: service_completed_successfully
+      rustfs-init:
+        condition: service_completed_successfully
+    networks:
+      default:
+        aliases:
+          - orb-chrysa
+
+  orb-chrysa-2:
+    build:
+      context: ../..
+    hostname: orb-chrysa-2
+    ports:
+      - "5052:5050"
+    environment:
+      HOSTNAME: orb-chrysa-2
+    volumes:
+      - shared-config:/etc/orb-chrysa:ro
+    command: ["--config", "/etc/orb-chrysa/auth-cluster.toml"]
+    depends_on:
+      kanidm-setup:
+        condition: service_completed_successfully
+      rustfs-init:
+        condition: service_completed_successfully
+    networks:
+      default:
+        aliases:
+          - orb-chrysa
+
+volumes:
+  rustfs-data:
+  certs:
+  kanidm-data:
+  shared-config:

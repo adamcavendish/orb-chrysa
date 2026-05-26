@@ -1,0 +1,17 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- $replicas := int .Values.replicaCount }}
+{{- $defaultMinAvailable := add (div $replicas 2) 1 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "orb-chrysa.fullname" . }}
+  namespace: {{ include "orb-chrysa.namespace" . }}
+  labels:
+    {{- include "orb-chrysa.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ default $defaultMinAvailable .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "orb-chrysa.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}

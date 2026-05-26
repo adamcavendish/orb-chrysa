@@ -1,0 +1,21 @@
+[Unit]
+Description=orb-chrysa OCI container registry
+Documentation=https://github.com/adamcavendish/orb-chrysa
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=orb-chrysa
+Group=orb-chrysa
+ExecStart=/usr/local/bin/orb-chrysa-server --config /etc/orb-chrysa/config.toml
+ExecStop=/bin/kill -SIGTERM $MAINPID
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+# Allow time for graceful Raft leave + snapshot upload before SIGKILL
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

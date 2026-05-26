@@ -1,0 +1,64 @@
+# OCI Distribution Spec
+
+Orb Chrysa implements the [OCI Distribution Specification v1.1](https://github.com/opencontainers/distribution-spec).
+
+## Conformance
+
+The OCI Distribution conformance tests are run via `tests/conformance/run.sh`.
+The harness builds the official upstream `conformance.test` binary from the
+pinned `opencontainers/distribution-spec` tag recorded in
+`tests/conformance/distribution-spec.ref` when the local ignored cache is missing
+or stale.
+
+```bash
+# Run conformance tests
+just conformance
+```
+
+## Implemented Endpoints
+
+All required endpoints from the specification are implemented:
+
+- **Blob operations**: upload, download, mount, delete
+- **Manifest operations**: push, pull, delete
+- **Tag operations**: list, resolve
+- **Referrers API**: list referrers for a subject digest
+- **Catalog**: list repositories
+
+## Unsupported Features
+
+- **Cross-repository blob mounting** (POST with `?mount=<digest>&from=<repo>`):
+  Mounts are metadata-only operations. The digest must already exist in S3.
+
+## OCI Error Codes
+
+Orb Chrysa returns standard OCI error codes in the response body:
+
+```json
+{
+  "errors": [
+    {
+      "code": "MANIFEST_UNKNOWN",
+      "message": "MANIFEST_UNKNOWN: manifest not found",
+      "detail": null
+    }
+  ]
+}
+```
+
+| Code | HTTP Status | Description |
+|------|-------------|-------------|
+| `BLOB_UNKNOWN` | 404 | Blob not found |
+| `BLOB_UPLOAD_INVALID` | 400 | Invalid upload |
+| `BLOB_UPLOAD_UNKNOWN` | 404 | Upload session not found |
+| `DIGEST_INVALID` | 400 | Invalid digest format |
+| `MANIFEST_BLOB_UNKNOWN` | 400 | Referenced blob not found |
+| `MANIFEST_INVALID` | 400 | Invalid manifest |
+| `MANIFEST_UNKNOWN` | 404 | Manifest not found |
+| `NAME_INVALID` | 400 | Invalid repository name |
+| `NAME_UNKNOWN` | 404 | Repository not found |
+| `SIZE_INVALID` | 400 | Invalid size |
+| `UNAUTHORIZED` | 401 | Authentication required |
+| `DENIED` | 403 | Access denied |
+| `UNSUPPORTED` | 405 | Unsupported operation |
+| `TOOMANYREQUESTS` | 429 | Rate limit exceeded |

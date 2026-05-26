@@ -1,0 +1,26 @@
+# Single-node orb-chrysa with local RustFS.
+# Paths assume binaries are run from the same directory as this config file,
+# or set ORB_CHRYSA_HOME to the directory containing config/.
+
+[server]
+listen = "127.0.0.1:5050"
+
+[server.limits]
+max_concurrent_uploads = 16
+max_concurrent_requests = 128
+
+[storage.s3]
+endpoint = "http://127.0.0.1:9000"
+bucket = "orb-chrysa"
+region = "us-east-1"
+access_key = "orb-chrysa"
+secret_key = "change-me-in-production"
+path_style = true
+
+[storage.s3.redirect]
+enabled = false
+
+[raft]
+listen = "127.0.0.1:5051"
+data_dir = "./data/raft"
+# Single-node: no discovery DNS needed — node 1 self-bootstraps.

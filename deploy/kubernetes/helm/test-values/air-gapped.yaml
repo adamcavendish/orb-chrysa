@@ -1,0 +1,15 @@
+storage:
+  s3:
+    endpoint: http://rustfs.rustfs.svc.cluster.local:9000
+    bucket: orb-chrysa
+    existingSecret: orb-chrysa-s3
+
+server:
+  tls:
+    existingSecret: orb-chrysa-server-tls
+    dnsNames:
+      - registry.airgap.local
+
+raft:
+  tls:
+    existingSecret: orb-chrysa-raft-mtls

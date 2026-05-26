@@ -1,0 +1,4 @@
+target/
+crates/orb-chrysa-server/dashboard/node_modules/
+crates/orb-chrysa-server/dashboard/dist/
+.git/

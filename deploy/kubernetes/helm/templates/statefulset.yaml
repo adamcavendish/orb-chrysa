@@ -1,0 +1,199 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "orb-chrysa.fullname" . }}
+  namespace: {{ include "orb-chrysa.namespace" . }}
+  labels:
+    {{- include "orb-chrysa.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "orb-chrysa.fullname" . }}-headless
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "orb-chrysa.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "orb-chrysa.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "orb-chrysa.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: orb-chrysa
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              umask 077
+              mkdir -p /tmp/orb-chrysa
+              escape_sed() {
+                printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'
+              }
+              S3_ACCESS_KEY_ESC="$(escape_sed "$S3_ACCESS_KEY")"
+              S3_SECRET_KEY_ESC="$(escape_sed "$S3_SECRET_KEY")"
+              {{- if .Values.auth.enabled }}
+              AUTH_CLIENT_SECRET_ESC="$(escape_sed "$AUTH_CLIENT_SECRET")"
+              AUTH_TOKEN_SIGNING_KEYS_ESC="$(escape_sed "$AUTH_TOKEN_SIGNING_KEYS")"
+              AUTH_SESSION_ENCRYPTION_KEY_ESC="$(escape_sed "$AUTH_SESSION_ENCRYPTION_KEY")"
+              {{- end }}
+              sed \
+                -e "s|__S3_ACCESS_KEY__|${S3_ACCESS_KEY_ESC}|g" \
+                -e "s|__S3_SECRET_KEY__|${S3_SECRET_KEY_ESC}|g" \
+                {{- if .Values.auth.enabled }}
+                -e "s|__AUTH_CLIENT_SECRET__|${AUTH_CLIENT_SECRET_ESC}|g" \
+                -e "s|__AUTH_TOKEN_SIGNING_KEYS__|${AUTH_TOKEN_SIGNING_KEYS_ESC}|g" \
+                -e "s|__AUTH_SESSION_ENCRYPTION_KEY__|${AUTH_SESSION_ENCRYPTION_KEY_ESC}|g" \
+                {{- end }}
+                /etc/orb-chrysa/config/config.toml.tpl > /tmp/orb-chrysa/config.toml
+              exec orb-chrysa-server --config /tmp/orb-chrysa/config.toml
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: HOSTNAME
+              value: "$(POD_NAME)"
+            - name: ORB_CHRYSA_RAFT_ADVERTISE_HOST
+              value: "$(POD_NAME).{{ include "orb-chrysa.fullname" . }}-headless.{{ include "orb-chrysa.namespace" . }}.svc.cluster.local"
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: ORB_CHRYSA_LOG_FORMAT
+              value: {{ .Values.logging.format | quote }}
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.storage.s3.existingSecret }}
+                  key: {{ .Values.storage.s3.accessKeyKey }}
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.storage.s3.existingSecret }}
+                  key: {{ .Values.storage.s3.secretKeyKey }}
+            {{- if .Values.auth.enabled }}
+            - name: AUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.clientSecretKey }}
+            - name: AUTH_TOKEN_SIGNING_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.tokenSigningKeysKey }}
+            - name: AUTH_SESSION_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.sessionEncryptionKeyKey }}
+            {{- end }}
+          ports:
+            - name: registry
+              containerPort: 5050
+            - name: raft
+              containerPort: 5051
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if and .Values.raft.kubernetes.enabled (gt (int .Values.raft.kubernetes.preStopSleepSeconds) 0) }}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -ec
+                  - sleep {{ .Values.raft.kubernetes.preStopSleepSeconds | quote }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /healthz
+              port: registry
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /readyz
+              port: registry
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: generated-config
+              mountPath: /tmp/orb-chrysa
+            - name: raft-data
+              mountPath: /tmp/raft
+            - name: config
+              mountPath: /etc/orb-chrysa/config
+              readOnly: true
+            - name: server-tls
+              mountPath: /etc/orb-chrysa/tls
+              readOnly: true
+            - name: raft-tls
+              mountPath: /etc/orb-chrysa/raft-tls
+              readOnly: true
+      volumes:
+        - name: generated-config
+          emptyDir: {}
+        - name: raft-data
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: {{ include "orb-chrysa.fullname" . }}-config
+        - name: server-tls
+          secret:
+            secretName: {{ .Values.server.tls.existingSecret }}
+        - name: raft-tls
+          secret:
+            secretName: {{ .Values.raft.tls.existingSecret }}
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+              {{- if .Values.certManager.enabled }}
+              - key: ca.crt
+                path: server-ca.crt
+              - key: ca.crt
+                path: client-ca.crt
+              {{- else }}
+              - key: server-ca.crt
+                path: server-ca.crt
+              - key: client-ca.crt
+                path: client-ca.crt
+              {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

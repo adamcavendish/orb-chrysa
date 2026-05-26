@@ -1,0 +1,3 @@
+{{- if lt (int .Values.replicaCount) 1 -}}
+{{- fail "replicaCount must be at least 1; scale-to-zero is not supported" -}}
+{{- end -}}

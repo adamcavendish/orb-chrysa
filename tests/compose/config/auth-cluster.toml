@@ -1,0 +1,46 @@
+[server]
+listen = "0.0.0.0:5050"
+
+[server.limits]
+max_concurrent_uploads = 64
+max_concurrent_requests = 512
+
+[storage.s3]
+endpoint = "http://rustfs:9000"
+bucket = "orb-chrysa"
+region = "us-east-1"
+access_key = "rustfsadmin"
+secret_key = "rustfsadmin"
+path_style = true
+
+[storage.s3.redirect]
+enabled = false
+public_endpoint = "http://localhost:9000"
+expires_secs = 900
+
+[raft]
+listen = "0.0.0.0:5051"
+data_dir = "/tmp/raft"
+discovery_dns = "orb-chrysa"
+
+[auth]
+issuer_url = "https://localhost:8443/oauth2/openid/orb-chrysa"
+issuer_internal_url = "https://kanidm:8443/oauth2/openid/orb-chrysa"
+client_id = "orb-chrysa"
+client_secret = "PLACEHOLDER_CLIENT_SECRET"
+token_endpoint_url = "http://localhost:5050/v2/token"
+redirect_uri = "http://localhost:5050/oauth2/callback"
+tls_insecure_skip_verify = true
+jwks_refresh_seconds = 300
+token_signing_keys = ["PLACEHOLDER_SIGNING_KEY"]
+session_encryption_key = "PLACEHOLDER_ENCRYPTION_KEY"
+
+[[auth.permissions]]
+name = "admin-full-access"
+groups = ["registry_admins"]
+scopes = ["repository:*:*"]
+
+[[auth.permissions]]
+name = "developer-access"
+groups = ["registry_developers"]
+scopes = ["repository:dev/*:push", "repository:dev/*:pull"]

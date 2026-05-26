@@ -1,0 +1,75 @@
+name: CI
+
+on: [push, pull_request]
+
+env:
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Install just
+        uses: taiki-e/install-action@just
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install mdbook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: 'latest'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl libssl-dev pkg-config
+
+      - name: Install mdbook-mermaid
+        run: cargo install --locked mdbook-mermaid
+
+      - name: Install dashboard toolchain
+        env:
+          VP_HOME: /opt/vite-plus
+          VP_NODE_MANAGER: "yes"
+          VP_NODE_VERSION: "24.15.0"
+          NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
+          npm_config_registry: https://registry.npmmirror.com
+        run: |
+          {
+            echo "VP_HOME=$VP_HOME"
+            echo "VP_NODE_MANAGER=$VP_NODE_MANAGER"
+            echo "VP_NODE_VERSION=$VP_NODE_VERSION"
+            echo "NPM_CONFIG_REGISTRY=$NPM_CONFIG_REGISTRY"
+            echo "npm_config_registry=$npm_config_registry"
+          } >> "$GITHUB_ENV"
+          sudo mkdir -p "$VP_HOME"
+          sudo chown -R "$USER:$USER" "$VP_HOME"
+          echo "$VP_HOME/bin" >> "$GITHUB_PATH"
+          export PATH="$VP_HOME/bin:$PATH"
+          echo "registry=https://registry.npmmirror.com" > .npmrc
+          curl -fsSL https://vite.plus | bash
+          cp .npmrc crates/orb-chrysa-server/dashboard/.npmrc
+          cd crates/orb-chrysa-server/dashboard
+          vp install
+          vp --version
+          node --version
+
+      - name: CI gate (fmt, clippy, test, dashboard-build)
+        run: just check
+
+      - name: Helm chart gate
+        run: just helm-check
+
+      - name: Docs gate
+        run: just docs-check

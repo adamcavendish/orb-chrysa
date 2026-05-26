@@ -1,0 +1,99 @@
+name: orb-chrysa-cluster
+
+services:
+  rustfs:
+    image: rustfs/rustfs:1.0.0-beta.6
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+      RUSTFS_ADDRESS: "0.0.0.0:9000"
+      RUSTFS_CONSOLE_ADDRESS: "0.0.0.0:9001"
+      RUSTFS_VOLUMES: /data
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  rustfs-init:
+    image: rustfs/rc:latest
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment:
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+    entrypoint: >
+      /bin/sh -c "
+      RUSTFS_IP=$$(getent hosts rustfs | awk '{print $$1}');
+      rc alias set local http://$$RUSTFS_IP:9000 $$RUSTFS_ACCESS_KEY $$RUSTFS_SECRET_KEY;
+      rc bucket create local/orb-chrysa -p;
+      "
+    restart: "no"
+
+  orb-chrysa-0:
+    build:
+      context: ../..
+    hostname: orb-chrysa-0
+    ports:
+      - "5050:5050"
+    environment:
+      HOSTNAME: orb-chrysa-0
+    volumes:
+      - ${ORB_CHRYSA_CONFIG:-../../tests/compose/config/cluster.toml}:/etc/orb-chrysa/config.toml:ro
+    command: ["--config", "/etc/orb-chrysa/config.toml"]
+    depends_on:
+      rustfs-init:
+        condition: service_completed_successfully
+    networks:
+      default:
+        aliases:
+          - orb-chrysa
+
+  orb-chrysa-1:
+    build:
+      context: ../..
+    hostname: orb-chrysa-1
+    ports:
+      - "5051:5050"
+    environment:
+      HOSTNAME: orb-chrysa-1
+    volumes:
+      - ${ORB_CHRYSA_CONFIG:-../../tests/compose/config/cluster.toml}:/etc/orb-chrysa/config.toml:ro
+    command: ["--config", "/etc/orb-chrysa/config.toml"]
+    depends_on:
+      rustfs-init:
+        condition: service_completed_successfully
+    networks:
+      default:
+        aliases:
+          - orb-chrysa
+
+  orb-chrysa-2:
+    build:
+      context: ../..
+    hostname: orb-chrysa-2
+    ports:
+      - "5052:5050"
+    environment:
+      HOSTNAME: orb-chrysa-2
+    volumes:
+      - ${ORB_CHRYSA_CONFIG:-../../tests/compose/config/cluster.toml}:/etc/orb-chrysa/config.toml:ro
+    command: ["--config", "/etc/orb-chrysa/config.toml"]
+    depends_on:
+      rustfs-init:
+        condition: service_completed_successfully
+    networks:
+      default:
+        aliases:
+          - orb-chrysa
+
+volumes:
+  rustfs-data:

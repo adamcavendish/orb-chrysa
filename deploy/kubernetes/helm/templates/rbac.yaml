@@ -1,0 +1,34 @@
+{{- if .Values.raft.kubernetes.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "orb-chrysa.fullname" . }}-statefulset-reader
+  namespace: {{ include "orb-chrysa.namespace" . }}
+  labels:
+    {{- include "orb-chrysa.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - apps
+    resources:
+      - statefulsets
+    resourceNames:
+      - {{ default (include "orb-chrysa.fullname" .) .Values.raft.kubernetes.statefulSetName | quote }}
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "orb-chrysa.fullname" . }}-statefulset-reader
+  namespace: {{ include "orb-chrysa.namespace" . }}
+  labels:
+    {{- include "orb-chrysa.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "orb-chrysa.serviceAccountName" . }}
+    namespace: {{ include "orb-chrysa.namespace" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "orb-chrysa.fullname" . }}-statefulset-reader
+{{- end }}

@@ -1,0 +1,90 @@
+# Production Docker Compose — three-node orb-chrysa cluster with RustFS.
+#
+#   docker compose -f deploy/compose/cluster.yml up -d
+#
+# Nodes are named orb-chrysa-0, orb-chrysa-1, orb-chrysa-2. The ordinal-0
+# node bootstraps the Raft cluster; others discover peers via DNS.
+
+name: orb-chrysa-cluster
+
+services:
+  rustfs:
+    image: rustfs/rustfs:1.0.0-beta.6
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-orb-chrysa}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-change-me-in-production}
+      RUSTFS_ADDRESS: "0.0.0.0:9000"
+      RUSTFS_CONSOLE_ADDRESS: "0.0.0.0:9001"
+      RUSTFS_VOLUMES: /data
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  rustfs-init:
+    image: rustfs/rc:latest
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment:
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-orb-chrysa}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-change-me-in-production}
+    entrypoint: >
+      /bin/sh -c "
+      RUSTFS_IP=$$(getent hosts rustfs | awk '{print $$1}');
+      rc alias set local http://$$RUSTFS_IP:9000 $$RUSTFS_ACCESS_KEY $$RUSTFS_SECRET_KEY;
+      rc bucket create local/orb-chrysa -p;
+      "
+
+  orb-chrysa-0:
+    image: ghcr.io/adamcavendish/orb-chrysa-server:latest
+    hostname: orb-chrysa-0
+    ports:
+      - "5050:5050"
+    environment:
+      HOSTNAME: orb-chrysa-0
+    volumes:
+      - ./config/cluster.toml:/etc/orb-chrysa/config.toml:ro
+    command: ["--config", "/etc/orb-chrysa/config.toml"]
+    depends_on:
+      rustfs-init:
+        condition: service_completed_successfully
+
+  orb-chrysa-1:
+    image: ghcr.io/adamcavendish/orb-chrysa-server:latest
+    hostname: orb-chrysa-1
+    ports:
+      - "5051:5050"
+    environment:
+      HOSTNAME: orb-chrysa-1
+    volumes:
+      - ./config/cluster.toml:/etc/orb-chrysa/config.toml:ro
+    command: ["--config", "/etc/orb-chrysa/config.toml"]
+    depends_on:
+      rustfs-init:
+        condition: service_completed_successfully
+
+  orb-chrysa-2:
+    image: ghcr.io/adamcavendish/orb-chrysa-server:latest
+    hostname: orb-chrysa-2
+    ports:
+      - "5052:5050"
+    environment:
+      HOSTNAME: orb-chrysa-2
+    volumes:
+      - ./config/cluster.toml:/etc/orb-chrysa/config.toml:ro
+    command: ["--config", "/etc/orb-chrysa/config.toml"]
+    depends_on:
+      rustfs-init:
+        condition: service_completed_successfully
+
+volumes:
+  rustfs-data:

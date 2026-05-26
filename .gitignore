@@ -1,0 +1,28 @@
+# Build
+/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+
+# Test results
+tests/conformance/results/
+tests/conformance/conformance.test
+tests/conformance/.distribution-spec/
+
+# Dashboard
+crates/orb-chrysa-server/dashboard/node_modules/
+crates/orb-chrysa-server/dashboard/dist/
+
+# Documentation build output
+docs/mdbook/book/

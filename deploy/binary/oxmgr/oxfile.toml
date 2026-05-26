@@ -1,0 +1,17 @@
+version = 1
+
+# orb-chrysa binary deployment — process group managed by oxmgr.
+#
+#   oxmgr apply oxfile.toml
+#
+# Prerequisites:
+#   - RustFS running on 127.0.0.1:9000 (or configure endpoint below)
+#   - orb-chrysa binary in $PATH
+#   - Config files in ./config/ or set ORB_CHRYSA_CONFIG
+
+[[apps]]
+name = "orb-chrysa"
+command = "orb-chrysa-server --config ./config/standalone.toml"
+restart_policy = "always"
+stop_timeout_secs = 60
+max_restarts = 10

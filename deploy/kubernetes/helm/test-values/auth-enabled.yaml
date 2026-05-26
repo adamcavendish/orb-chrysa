@@ -1,0 +1,12 @@
+storage:
+  s3:
+    endpoint: http://s3.example.internal:9000
+    bucket: orb-chrysa
+
+auth:
+  enabled: true
+  issuerUrl: https://idp.example.internal
+  issuerInternalUrl: http://kanidm.kanidm.svc.cluster.local:8443
+  clientId: orb-chrysa
+  tokenEndpointUrl: https://idp.example.internal/oauth2/token
+  redirectUri: https://registry.example.internal/oauth2/callback

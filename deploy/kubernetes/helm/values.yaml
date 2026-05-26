@@ -1,0 +1,121 @@
+replicaCount: 3
+
+namespaceOverride: ""
+
+image:
+  repository: ghcr.io/adamcavendish/orb-chrysa-server
+  tag: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+logging:
+  format: json
+
+service:
+  type: ClusterIP
+  port: 5050
+  nodePort: null
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+  annotations: {}
+  raftPort: 5051
+
+storage:
+  s3:
+    endpoint: ""
+    bucket: ""
+    region: us-east-1
+    pathStyle: true
+    existingSecret: orb-chrysa-s3
+    accessKeyKey: access_key
+    secretKeyKey: secret_key
+    redirect:
+      enabled: false
+      publicEndpoint: ""
+      expiresSecs: 900
+
+server:
+  tls:
+    existingSecret: orb-chrysa-server-tls
+    dnsNames: []
+
+raft:
+  tls:
+    existingSecret: orb-chrysa-raft-mtls
+  kubernetes:
+    enabled: true
+    statefulSetName: ""
+    reconcileSeconds: 2
+    preStopSleepSeconds: 25
+
+auth:
+  enabled: false
+  issuerUrl: ""
+  issuerInternalUrl: ""
+  issuerInternalUrls: []
+  jwksUrls: []
+  clientId: orb-chrysa
+  tokenEndpointUrl: ""
+  redirectUri: ""
+  tlsInsecureSkipVerify: false
+  jwksRefreshSeconds: 300
+  jwksCacheS3Key: auth/jwks/last-good.json
+  jwksMaxStaleSeconds: 86400
+  existingSecret: orb-chrysa-auth
+  clientSecretKey: client_secret
+  tokenSigningKeysKey: token_signing_keys
+  sessionEncryptionKeyKey: session_encryption_key
+  permissions:
+    - name: admin-full-access
+      groups: ["registry_admins"]
+      scopes: ["repository:*:*"]
+
+certManager:
+  enabled: false
+  issuerRef:
+    name: ""
+    kind: ClusterIssuer
+    group: cert-manager.io
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: null
+
+networkPolicy:
+  enabled: true
+
+terminationGracePeriodSeconds: 90
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+topologySpreadConstraints: []
