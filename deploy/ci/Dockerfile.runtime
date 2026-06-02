@@ -1,0 +1,17 @@
+# Dockerfile.runtime — minimal runtime image for CI cross-compilation path.
+#
+# The orb-chrysa-server binary is cross-compiled via `cargo zigbuild` outside
+# Docker (see release-artifacts.yml). This Dockerfile only layers the pre-built
+# binary onto the Debian base image — no Rust toolchain, no QEMU emulation.
+#
+# For local single-arch dev builds, use the main Dockerfile instead.
+
+FROM debian:trixie-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY orb-chrysa-server /usr/local/bin/orb-chrysa-server
+
+ENTRYPOINT ["orb-chrysa-server"]
