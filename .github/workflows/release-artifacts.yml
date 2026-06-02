@@ -139,20 +139,16 @@ jobs:
           context: .
           file: deploy/ci/Dockerfile.runtime
           platforms: ${{ matrix.platform.arch }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true
 
       - name: Export digest
-        run: |
-          mkdir -p /tmp/digests
-          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.platform.slug }}"
+        run: echo "${{ steps.build.outputs.digest }}" > "${{ matrix.platform.slug }}.digest"
 
       - name: Upload digest
         uses: actions/upload-artifact@v7
         with:
           name: digest-${{ matrix.platform.slug }}
-          path: /tmp/digests/${{ matrix.platform.slug }}
+          path: ${{ matrix.platform.slug }}.digest
           retention-days: 1
 
   # Stitch the per-architecture images into a single multi-arch manifest
@@ -165,7 +161,6 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           pattern: digest-*
-          path: /tmp/digests
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -190,13 +185,14 @@ jobs:
 
       - name: Create manifest list and push
         run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           DIGESTS=""
-          for f in /tmp/digests/*; do
-            DIGESTS="$DIGESTS $(cat "$f")"
+          for f in *.digest; do
+            DIGESTS="$DIGESTS $IMAGE@$(cat "$f")"
           done
           TAGS=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "${{ steps.meta.outputs.json }}")
           echo "Tags: $TAGS"
-          echo "Digests: $DIGESTS"
+          echo "Sources: $DIGESTS"
           docker buildx imagetools create $TAGS $DIGESTS
 
   chart:
