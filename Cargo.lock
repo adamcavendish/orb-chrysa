@@ -3057,7 +3057,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "orb-chrysa-cli"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aioduct",
  "base64 0.22.1",
@@ -3076,7 +3076,7 @@ dependencies = [
 
 [[package]]
 name = "orb-chrysa-server"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aes-gcm",
  "aioduct",

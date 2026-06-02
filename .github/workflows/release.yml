@@ -127,6 +127,11 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      - name: "Install vp (vite-plus) and Node"
+        uses: "voidzero-dev/setup-vp@v1"
+        with:
+          "cache": false
+          "node-version": "24.15.0"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest

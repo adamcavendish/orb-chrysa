@@ -149,11 +149,17 @@ jobs:
   dockerfile-lint:
     name: Dockerfile check
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dockerfile:
+          - Dockerfile
+          - deploy/ci/Dockerfile.runtime
     steps:
       - uses: actions/checkout@v6
       - uses: hadolint/hadolint-action@v3.1.0
         with:
-          dockerfile: Dockerfile
+          dockerfile: ${{ matrix.dockerfile }}
           failure-threshold: error
 
   helm-check:

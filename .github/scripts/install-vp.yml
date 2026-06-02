@@ -1,0 +1,8 @@
+# Steps injected by cargo-dist's `github-build-setup` before `dist build`
+# on every build runner. Installs vp (vite-plus) for the dashboard build.rs.
+
+- name: Install vp (vite-plus) and Node
+  uses: voidzero-dev/setup-vp@v1
+  with:
+    node-version: "24.15.0"
+    cache: false

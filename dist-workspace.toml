@@ -15,4 +15,8 @@ targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-unknown
 hosting = "github"
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
+# Whether to install an updater program
 install-updater = false
+# Extra CI steps to install vp (vite-plus) before dist build on each runner.
+# The path is relative to .github/workflows/.
+github-build-setup = "../scripts/install-vp.yml"
