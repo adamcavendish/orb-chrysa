@@ -139,8 +139,6 @@ jobs:
         with:
           node-version: "24"
           cache: true
-        env:
-          NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
       - name: Install
         working-directory: crates/orb-chrysa-server/dashboard
         run: vp install
