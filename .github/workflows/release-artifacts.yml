@@ -185,16 +185,26 @@ jobs:
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
       - name: Create manifest list and push
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
-          DIGESTS=""
+          DIGESTS=()
           for f in *.digest; do
-            DIGESTS="$DIGESTS $IMAGE@$(cat "$f")"
+            digest="$(tr -d '[:space:]' < "$f")"
+            if [ -n "$digest" ]; then
+              DIGESTS+=("$IMAGE@$digest")
+            fi
           done
-          TAGS=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "${{ steps.meta.outputs.json }}")
-          echo "Tags: $TAGS"
-          echo "Sources: $DIGESTS"
-          docker buildx imagetools create $TAGS $DIGESTS
+          TAG_ARGS=()
+          while IFS= read -r tag; do
+            TAG_ARGS+=("-t" "$tag")
+          done < <(printf '%s\n' "$TAGS" | awk 'NF && !seen[$0]++')
+          echo "Tags:"
+          printf '  %s\n' "${TAG_ARGS[@]}"
+          echo "Sources:"
+          printf '  %s\n' "${DIGESTS[@]}"
+          docker buildx imagetools create "${TAG_ARGS[@]}" "${DIGESTS[@]}"
 
   chart:
     runs-on: ubuntu-latest
@@ -212,6 +222,17 @@ jobs:
           echo "Chart packaged: dist/layerhouse-$VERSION.tgz"
 
       - name: Upload chart to release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*.tgz
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ github.ref_name }}"
+          for attempt in {1..120}; do
+            if gh release view "$VERSION" >/dev/null 2>&1; then
+              gh release upload "$VERSION" "dist/layerhouse-$VERSION.tgz" --clobber
+              exit 0
+            fi
+            echo "Waiting for cargo-dist release $VERSION ($attempt/120)"
+            sleep 10
+          done
+          echo "Release $VERSION was not created in time" >&2
+          exit 1
