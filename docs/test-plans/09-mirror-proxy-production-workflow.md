@@ -3,9 +3,9 @@
 **Date**: 2026-05-26
 **Type**: Runtime product test plan
 **Source**: Mirror/proxy cache runtime behavior and production OCI workflow QA
-**Scope**: End-to-end mirror rule execution, proxy-cache pull-through, warm-up,
-push mirror behavior, outbound proxy validation, local upstream registry
-isolation, and cleanup.
+**Scope**: End-to-end mirror rule execution, proxy-cache pull-through, Docker
+manifest-list pull-through, warm-up, push mirror behavior, outbound proxy
+validation, local upstream registry isolation, and cleanup.
 
 ---
 
@@ -68,6 +68,7 @@ otherwise use `just check` for the normal CI-quality gate and run
 | Local upstream registry isolation | MP1 | P0 |
 | Pull mirror trigger and job run | MP2 | P0 |
 | Proxy cache pull-through and cached hit | MP3 | P0 |
+| Docker manifest-list proxy-cache matrix | MP3a | P0 |
 | Proxy cache warm now job | MP4 | P0 |
 | Push mirror trigger and upstream publication | MP5 | P1 |
 | Outbound proxy validation | MP6 | P0 |
@@ -134,6 +135,52 @@ otherwise use `just check` for the normal CI-quality gate and run
   unavailable.
 - Dashboard repository/detail APIs show the cached digest under the local cache
   repository.
+
+### MP3a. Docker Manifest-List Proxy-Cache Matrix
+
+**Steps**:
+1. Build a scratch Docker image locally without pulling a base image.
+2. Push the native-platform child image to the disposable upstream registry as
+   `library/alpine:{run_id}`.
+3. Publish a Docker manifest list at upstream `library/alpine:3` that points to
+   the child image.
+4. Create a proxy-cache rule with:
+   - `local_prefix=qa/docker-root-{RUN_ID}`
+   - `upstream_registry={upstream_container}:5000`
+   - `upstream_prefix=" / "`
+   - `plain_http=true`
+5. Send `HEAD /v2/qa/docker-root-{RUN_ID}/library/alpine/manifests/3` through
+   layerhouse and compare `Docker-Content-Digest` with upstream.
+6. Send `GET /v2/qa/docker-root-{RUN_ID}/library/alpine/manifests/3` through
+   layerhouse and verify the dashboard manifest list records the upstream
+   manifest-list digest.
+7. Pull `localhost:5050/qa/docker-root-{RUN_ID}/library/alpine:3` with Docker.
+8. Remove the local pulled image tag, pause the upstream registry, and pull the
+   same layerhouse tag again.
+9. Create a second proxy-cache rule with:
+   - `local_prefix=qa/docker-library-{RUN_ID}`
+   - `upstream_prefix=" /library/ "`
+10. Send `HEAD /v2/qa/docker-library-{RUN_ID}/alpine/manifests/3` through
+   layerhouse and compare `Docker-Content-Digest` with upstream.
+11. Send `GET /v2/qa/docker-library-{RUN_ID}/alpine/manifests/3` through
+   layerhouse and verify the dashboard manifest list records the upstream
+   manifest-list digest.
+12. Pull `localhost:5050/qa/docker-library-{RUN_ID}/alpine:3` with Docker.
+
+**Expected**:
+- The smoke uses a local manifest list and does not depend on Docker Hub.
+- `upstream_prefix="/"` is normalized to root, so Docker Hub-style
+  `library/alpine:3` pulls through the cache.
+- `upstream_prefix="/library/"` is normalized to `library`, so the local short
+  repository `alpine:3` maps to upstream `library/alpine:3`.
+- `HEAD` on an uncached Docker manifest list succeeds and returns the upstream
+  manifest-list digest without caching the manifest body.
+- `GET` on the manifest list caches the manifest body and records the local tag
+  before Docker host content-cache behavior can hide registry writes.
+- Docker's real pull sequence can fetch the manifest list, selected child
+  manifest, config blob, and layers through layerhouse.
+- A second Docker pull succeeds while upstream is paused, proving the local
+  cache has the selected child manifest and blobs.
 
 ### MP4. Proxy Cache Warm Now Job
 
@@ -231,6 +278,7 @@ For every run, record:
 - ORAS, Docker, curl, and jq versions.
 - Upstream container name, image, host port, and compose network.
 - Mirror/proxy rule IDs and local prefixes.
+- Docker manifest-list digest and native platform used for Docker pull-through.
 - Triggered job IDs and final run JSON.
 - Source and mirrored/cached/pushed manifest digests.
 - Cluster leader and healthy voter count before and after the workflow.

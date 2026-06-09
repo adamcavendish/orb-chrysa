@@ -30,6 +30,16 @@ CACHE_RULE="qa-cache-$RUN_ID"
 CACHE_REPO="qa/cache-$RUN_ID"
 CACHE_UPSTREAM_REPO="upstream/cache-src"
 
+DOCKER_ROOT_CACHE_RULE="qa-docker-root-$RUN_ID"
+DOCKER_ROOT_REPO="qa/docker-root-$RUN_ID"
+DOCKER_ROOT_LOCAL_REPO="$DOCKER_ROOT_REPO/library/alpine"
+DOCKER_LIBRARY_CACHE_RULE="qa-docker-library-$RUN_ID"
+DOCKER_LIBRARY_REPO="qa/docker-library-$RUN_ID"
+DOCKER_LIBRARY_LOCAL_REPO="$DOCKER_LIBRARY_REPO/alpine"
+DOCKER_UPSTREAM_REPO="library/alpine"
+DOCKER_TAG="3"
+DOCKER_CHILD_TAG="layerhouse-smoke-$RUN_ID"
+
 WARM_RULE="qa-cache-warm-$RUN_ID"
 WARM_REPO="qa/cache-warm-$RUN_ID"
 WARM_UPSTREAM_REPO="upstream/cache-warm"
@@ -95,12 +105,24 @@ cleanup() {
     delete_rule "$PROXY_DIRECT_RULE"
     delete_rule "$PROXY_SECRET_RULE"
     delete_cache "$CACHE_RULE"
+    delete_cache "$DOCKER_ROOT_CACHE_RULE"
+    delete_cache "$DOCKER_LIBRARY_CACHE_RULE"
     delete_cache "$WARM_RULE"
     delete_cache "$PROXY_SECRET_CACHE"
     delete_repo "$MIRROR_REPO"
     delete_repo "$CACHE_REPO"
+    delete_repo "$DOCKER_ROOT_LOCAL_REPO"
+    delete_repo "$DOCKER_LIBRARY_LOCAL_REPO"
     delete_repo "$WARM_REPO"
     delete_repo "$PUSH_SRC_REPO"
+    if [ -n "$UPSTREAM_HOST_REGISTRY" ]; then
+        docker image rm \
+            "$UPSTREAM_HOST_REGISTRY/$DOCKER_UPSTREAM_REPO:$DOCKER_CHILD_TAG" \
+            "$UPSTREAM_HOST_REGISTRY/$DOCKER_UPSTREAM_REPO:$DOCKER_TAG" \
+            "$REGISTRY/$DOCKER_ROOT_LOCAL_REPO:$DOCKER_TAG" \
+            "$REGISTRY/$DOCKER_LIBRARY_LOCAL_REPO:$DOCKER_TAG" \
+            >/dev/null 2>&1 || true
+    fi
     docker rm -f "$UPSTREAM_NAME" >/dev/null 2>&1 || true
     if [ "$status" -eq 0 ]; then
         echo "PASS mirror/proxy production workflow. Evidence: $WORK"
@@ -236,6 +258,45 @@ pull_oras_file() {
     oras pull "${ORAS_TRANSPORT_FLAGS[@]}" --no-tty -o "$out_dir" "$ref"
 }
 
+docker_oci_arch() {
+    local arch
+    arch="$(docker info --format '{{.Architecture}}')"
+    case "$arch" in
+        amd64|x86_64) echo "amd64" ;;
+        arm64|aarch64) echo "arm64" ;;
+        armv7l) echo "arm" ;;
+        *) echo "$arch" ;;
+    esac
+}
+
+docker_oci_variant() {
+    local arch
+    arch="$(docker info --format '{{.Architecture}}')"
+    case "$arch" in
+        armv7l) echo "v7" ;;
+        *) echo "" ;;
+    esac
+}
+
+manifest_head_digest() {
+    local url="$1"
+    local output="$2"
+    curl -fsSI \
+        -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+        -H 'Accept: application/vnd.oci.image.index.v1+json' \
+        "$url" | tee "$output" >/dev/null
+    awk -F': ' 'tolower($1) == "docker-content-digest" { gsub(/\r/, "", $2); print $2 }' "$output" | tail -1
+}
+
+get_manifest_list() {
+    local url="$1"
+    local output="$2"
+    curl -fsS \
+        -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+        -H 'Accept: application/vnd.oci.image.index.v1+json' \
+        "$url" | tee "$output"
+}
+
 need curl
 need jq
 need oras
@@ -243,9 +304,11 @@ need docker
 need cmp
 need sed
 need grep
+need awk
 
 mkdir -p \
     "$WORK/seed" \
+    "$WORK/dockerctx" \
     "$WORK/mirror-v1" \
     "$WORK/mirror-v2" \
     "$WORK/cache-first" \
@@ -272,6 +335,12 @@ MIRROR_RULE=$MIRROR_RULE
 MIRROR_REPO=$MIRROR_REPO
 CACHE_RULE=$CACHE_RULE
 CACHE_REPO=$CACHE_REPO
+DOCKER_ROOT_CACHE_RULE=$DOCKER_ROOT_CACHE_RULE
+DOCKER_ROOT_LOCAL_REPO=$DOCKER_ROOT_LOCAL_REPO
+DOCKER_LIBRARY_CACHE_RULE=$DOCKER_LIBRARY_CACHE_RULE
+DOCKER_LIBRARY_LOCAL_REPO=$DOCKER_LIBRARY_LOCAL_REPO
+DOCKER_UPSTREAM_REPO=$DOCKER_UPSTREAM_REPO
+DOCKER_TAG=$DOCKER_TAG
 WARM_RULE=$WARM_RULE
 WARM_REPO=$WARM_REPO
 PUSH_RULE=$PUSH_RULE
@@ -332,6 +401,38 @@ WARM_DIGEST="$(jq -r '.digest' "$WORK/upstream-warm.json")"
 printf 'MIRROR_V1_DIGEST=%s\nMIRROR_V2_DIGEST=%s\nCACHE_V1_DIGEST=%s\nWARM_DIGEST=%s\n' \
     "$MIRROR_V1_DIGEST" "$MIRROR_V2_DIGEST" "$CACHE_V1_DIGEST" "$WARM_DIGEST" \
     | tee -a "$WORK/summary.env"
+
+log "Seed upstream registry with Docker manifest-list image"
+DOCKER_ARCH="$(docker_oci_arch)"
+DOCKER_VARIANT="$(docker_oci_variant)"
+DOCKER_UPSTREAM_CHILD_REF="$UPSTREAM_HOST_REGISTRY/$DOCKER_UPSTREAM_REPO:$DOCKER_CHILD_TAG"
+DOCKER_UPSTREAM_INDEX_REF="$UPSTREAM_HOST_REGISTRY/$DOCKER_UPSTREAM_REPO:$DOCKER_TAG"
+cat > "$WORK/dockerctx/Dockerfile" <<'DOCKERFILE'
+FROM scratch
+LABEL org.opencontainers.image.title="layerhouse docker proxy smoke"
+COPY docker-smoke.txt /layerhouse-smoke.txt
+DOCKERFILE
+printf 'docker manifest-list payload %s\n' "$RUN_ID" > "$WORK/dockerctx/docker-smoke.txt"
+docker build -t "$DOCKER_UPSTREAM_CHILD_REF" "$WORK/dockerctx" \
+    | tee "$WORK/docker-build.log"
+docker push "$DOCKER_UPSTREAM_CHILD_REF" \
+    | tee "$WORK/docker-push-child.log"
+docker buildx imagetools create --tag "$DOCKER_UPSTREAM_INDEX_REF" "$DOCKER_UPSTREAM_CHILD_REF" \
+    | tee "$WORK/docker-imagetools-create.log"
+docker manifest inspect --insecure "$DOCKER_UPSTREAM_INDEX_REF" \
+    | tee "$WORK/docker-upstream-index.json" \
+    | jq -e --arg arch "$DOCKER_ARCH" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)' >/dev/null
+UPSTREAM_DOCKER_INDEX_DIGEST="$(manifest_head_digest \
+    "http://$UPSTREAM_HOST_REGISTRY/v2/$DOCKER_UPSTREAM_REPO/manifests/$DOCKER_TAG" \
+    "$WORK/docker-upstream-index.headers")"
+[ -n "$UPSTREAM_DOCKER_INDEX_DIGEST" ]
+printf 'DOCKER_ARCH=%s\nDOCKER_VARIANT=%s\nDOCKER_INDEX_DIGEST=%s\n' \
+    "$DOCKER_ARCH" "$DOCKER_VARIANT" "$UPSTREAM_DOCKER_INDEX_DIGEST" \
+    | tee -a "$WORK/summary.env"
+docker image rm \
+    "$DOCKER_UPSTREAM_CHILD_REF" \
+    "$DOCKER_UPSTREAM_INDEX_REF" \
+    >/dev/null 2>&1 || true
 
 log "Create and trigger manual pull mirror rule"
 cat > "$WORK/mirror-rule.json" <<JSON
@@ -405,6 +506,85 @@ docker pause "$UPSTREAM_NAME" >/dev/null
 pull_oras_file "$(orb_ref "$CACHE_REPO" "v1")" "$WORK/cache-second"
 docker unpause "$UPSTREAM_NAME" >/dev/null
 cmp "$WORK/seed/cache-v1.txt" "$WORK/cache-second/cache-v1.txt"
+
+log "Verify Docker proxy-cache manifest-list pull-through for root prefix"
+cat > "$WORK/docker-root-cache-rule.json" <<JSON
+{
+  "id": "$DOCKER_ROOT_CACHE_RULE",
+  "local_prefix": "$DOCKER_ROOT_REPO",
+  "upstream_registry": "$UPSTREAM_ORB_REGISTRY",
+  "upstream_prefix": " / ",
+  "warm_filters": [{ "type": "none" }],
+  "warm_schedule": null,
+  "plain_http": true,
+  "outbound_proxy": { "protocol": "none" },
+  "username": null,
+  "password": null,
+  "created_at": 0
+}
+JSON
+json_put "$(api_url "/api/v1/admin/proxy-cache/$DOCKER_ROOT_CACHE_RULE")" "$WORK/docker-root-cache-rule.json" \
+    | tee "$WORK/docker-root-cache-rule-put.body" >/dev/null
+wait_for_api_jq \
+    "/api/v1/admin/proxy-cache/$DOCKER_ROOT_CACHE_RULE" \
+    "$WORK/docker-root-cache-rule-public.json" \
+    '.id == "'"$DOCKER_ROOT_CACHE_RULE"'" and .upstream_prefix == null and .outbound_proxy.protocol == "none"' \
+    "docker root proxy cache visibility"
+ROOT_HEAD_DIGEST="$(manifest_head_digest \
+    "$(api_url "/v2/$DOCKER_ROOT_LOCAL_REPO/manifests/$DOCKER_TAG")" \
+    "$WORK/docker-root-head.headers")"
+test "$ROOT_HEAD_DIGEST" = "$UPSTREAM_DOCKER_INDEX_DIGEST"
+get_manifest_list \
+    "$(api_url "/v2/$DOCKER_ROOT_LOCAL_REPO/manifests/$DOCKER_TAG")" \
+    "$WORK/docker-root-index.json" \
+    | jq -e --arg arch "$DOCKER_ARCH" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)' >/dev/null
+curl -fsS "$(api_url "/api/v1/repositories/$DOCKER_ROOT_LOCAL_REPO/manifests")" \
+    | tee "$WORK/docker-root-manifests.json" \
+    | jq -e --arg d "$UPSTREAM_DOCKER_INDEX_DIGEST" '.manifests[] | select(.digest == $d and (.tags | index("'"$DOCKER_TAG"'")))' >/dev/null
+docker pull "$REGISTRY/$DOCKER_ROOT_LOCAL_REPO:$DOCKER_TAG" \
+    | tee "$WORK/docker-root-pull.log"
+docker image rm "$REGISTRY/$DOCKER_ROOT_LOCAL_REPO:$DOCKER_TAG" >/dev/null 2>&1 || true
+docker pause "$UPSTREAM_NAME" >/dev/null
+docker pull "$REGISTRY/$DOCKER_ROOT_LOCAL_REPO:$DOCKER_TAG" \
+    | tee "$WORK/docker-root-cached-pull.log"
+docker unpause "$UPSTREAM_NAME" >/dev/null
+
+log "Verify Docker proxy-cache manifest-list pull-through for /library/ prefix"
+cat > "$WORK/docker-library-cache-rule.json" <<JSON
+{
+  "id": "$DOCKER_LIBRARY_CACHE_RULE",
+  "local_prefix": "$DOCKER_LIBRARY_REPO",
+  "upstream_registry": "$UPSTREAM_ORB_REGISTRY",
+  "upstream_prefix": " /library/ ",
+  "warm_filters": [{ "type": "none" }],
+  "warm_schedule": null,
+  "plain_http": true,
+  "outbound_proxy": { "protocol": "none" },
+  "username": null,
+  "password": null,
+  "created_at": 0
+}
+JSON
+json_put "$(api_url "/api/v1/admin/proxy-cache/$DOCKER_LIBRARY_CACHE_RULE")" "$WORK/docker-library-cache-rule.json" \
+    | tee "$WORK/docker-library-cache-rule-put.body" >/dev/null
+wait_for_api_jq \
+    "/api/v1/admin/proxy-cache/$DOCKER_LIBRARY_CACHE_RULE" \
+    "$WORK/docker-library-cache-rule-public.json" \
+    '.id == "'"$DOCKER_LIBRARY_CACHE_RULE"'" and .upstream_prefix == "library" and .outbound_proxy.protocol == "none"' \
+    "docker library proxy cache visibility"
+LIBRARY_HEAD_DIGEST="$(manifest_head_digest \
+    "$(api_url "/v2/$DOCKER_LIBRARY_LOCAL_REPO/manifests/$DOCKER_TAG")" \
+    "$WORK/docker-library-head.headers")"
+test "$LIBRARY_HEAD_DIGEST" = "$UPSTREAM_DOCKER_INDEX_DIGEST"
+get_manifest_list \
+    "$(api_url "/v2/$DOCKER_LIBRARY_LOCAL_REPO/manifests/$DOCKER_TAG")" \
+    "$WORK/docker-library-index.json" \
+    | jq -e --arg arch "$DOCKER_ARCH" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)' >/dev/null
+curl -fsS "$(api_url "/api/v1/repositories/$DOCKER_LIBRARY_LOCAL_REPO/manifests")" \
+    | tee "$WORK/docker-library-manifests.json" \
+    | jq -e --arg d "$UPSTREAM_DOCKER_INDEX_DIGEST" '.manifests[] | select(.digest == $d and (.tags | index("'"$DOCKER_TAG"'")))' >/dev/null
+docker pull "$REGISTRY/$DOCKER_LIBRARY_LOCAL_REPO:$DOCKER_TAG" \
+    | tee "$WORK/docker-library-pull.log"
 
 log "Create proxy cache warm rule and verify warm job"
 cat > "$WORK/warm-rule.json" <<JSON
@@ -589,7 +769,7 @@ cat > "$WORK/proxy-secret-cache.json" <<JSON
   "plain_http": true,
   "outbound_proxy": {
     "protocol": "socks5",
-    "url": "socks5://127.0.0.1:1080",
+    "url": "socks5h://127.0.0.1:1080",
     "username": "proxy-user",
     "password": "proxy-pass"
   },
