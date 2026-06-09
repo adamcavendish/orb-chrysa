@@ -464,8 +464,9 @@ mod tests {
     use super::*;
     use crate::store::blob::InMemoryBlobStore;
     use crate::store::metadata::{
-        InMemoryMetadataStore, MirrorConfigStore, MirrorRule, MirrorStrategy, OutboundProxy,
-        OutboundProxyProtocol, ProxyCache, SyncJob, SyncJobKind,
+        InMemoryMetadataStore, JobStore, MirrorConfigStore, MirrorRule, MirrorStrategy,
+        OutboundProxy, OutboundProxyProtocol, ProxyCache, SyncJob, SyncJobKind, SyncJobRun,
+        SyncRunEventKind, SyncRunStatus,
     };
     use axum::body::Body;
     use std::sync::Arc;
@@ -834,6 +835,51 @@ mod tests {
             .unwrap()
             .expect("proxy cache should be saved");
         assert_eq!(saved.upstream_registry, "docker.io");
+    }
+
+    #[tokio::test]
+    async fn list_job_runs_includes_progress_fields() {
+        let state = test_state();
+        let mut run = SyncJobRun::running(
+            "run-1".to_string(),
+            "job-1".to_string(),
+            "node-1".to_string(),
+            10,
+        );
+        run.mark_resolution_finished(2, 11);
+        run.mark_tag_started("3.20", "Pulling tag", 12);
+        run.mark_tag_finished("3.20", SyncRunEventKind::Success, "Synced tag", 1, 13);
+        run.mark_finished(
+            SyncRunStatus::PartialFailure,
+            vec!["3.20".to_string()],
+            vec![("3.21".to_string(), "not found upstream".to_string())],
+            14,
+        );
+        state.core.metadata.put_sync_job_run(run).await.unwrap();
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/admin/mirror/jobs/job-1/runs?limit=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let run = &value[0];
+        assert_eq!(run["phase"], "Partial failure");
+        assert_eq!(run["total_tags"], 2);
+        assert_eq!(run["completed_tags"], 2);
+        assert_eq!(run["updated_at"], 14);
+        assert_eq!(run["recent_events"][0]["kind"], "Info");
+        assert_eq!(run["recent_events"][2]["kind"], "Success");
     }
 
     #[tokio::test]

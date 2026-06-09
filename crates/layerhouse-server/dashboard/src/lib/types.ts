@@ -226,8 +226,21 @@ export interface SyncJobRun {
   started_at: number;
   finished_at: number | null;
   status: "Running" | "Succeeded" | "PartialFailure" | "Failed";
+  phase: string;
+  total_tags: number;
+  completed_tags: number;
+  current_tag: string | null;
+  updated_at: number;
+  recent_events: SyncRunEvent[];
   tags_synced: string[];
   tags_failed: [string, string][];
+}
+
+export interface SyncRunEvent {
+  at: number;
+  kind: "Info" | "Success" | "Warning" | "Error";
+  tag: string | null;
+  message: string;
 }
 
 // ---- Proxy Cache ----

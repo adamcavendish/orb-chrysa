@@ -8,8 +8,8 @@ use crate::store::blob::BlobStore;
 #[allow(unused_imports)]
 use crate::store::metadata::{
     JobStore, MirrorConfigStore, MirrorDirection, MirrorRule, ProxyCache, SchedulerStore, SyncJob,
-    SyncJobKind, SyncJobRun, SyncJobStatus, SyncRunStatus, WarmImage, mirror_rule_job, now_epoch,
-    proxy_cache_warm_job,
+    SyncJobKind, SyncJobRun, SyncJobStatus, SyncRunEventKind, SyncRunStatus, WarmImage,
+    mirror_rule_job, now_epoch, proxy_cache_warm_job,
 };
 
 const TICK_INTERVAL_SECS: u64 = 15;
@@ -263,16 +263,12 @@ async fn execute_due_jobs<M: SchedulerStore, B: BlobStore>(
             }
         }
 
-        let run = SyncJobRun {
-            id: uuid::Uuid::new_v4().to_string(),
-            job_id: job.id.clone(),
-            node_id: node_id.to_string(),
-            started_at: now,
-            finished_at: None,
-            status: SyncRunStatus::Running,
-            tags_synced: Vec::new(),
-            tags_failed: Vec::new(),
-        };
+        let run = SyncJobRun::running(
+            uuid::Uuid::new_v4().to_string(),
+            job.id.clone(),
+            node_id.to_string(),
+            now,
+        );
         if let Err(e) = state.core.metadata.put_sync_job_run(run.clone()).await {
             tracing::warn!(err = %e, "scheduler: failed to record sync run start");
         }
@@ -285,13 +281,14 @@ async fn execute_due_jobs<M: SchedulerStore, B: BlobStore>(
         let planned_image = job.image.clone();
         let planned_tags = job.tags.clone();
         let interval = job.interval_secs;
-        let run_id = run.id.clone();
-        let node = node_id.to_string();
-        let run_started_at = run.started_at;
+        let mut run = run;
 
         tokio::spawn(async move {
             let mut synced = Vec::new();
             let mut failed: Vec<(String, String)> = Vec::new();
+            run.mark_resolution_started(now_epoch());
+            persist_sync_run(&state.core.metadata, &run, "resolution start").await;
+
             let (direction, image, tags) = match (&job_kind, rule_id.as_deref()) {
                 (SyncJobKind::Mirror, Some(rule_id)) => match state
                     .mirror
@@ -300,7 +297,10 @@ async fn execute_due_jobs<M: SchedulerStore, B: BlobStore>(
                 {
                     Ok(resolved) => (resolved.direction, resolved.local_repo, resolved.tags),
                     Err(e) => {
-                        failed.push(("resolve".to_string(), e.to_string()));
+                        let message = e.to_string();
+                        run.mark_resolution_failed(&message, now_epoch());
+                        persist_sync_run(&state.core.metadata, &run, "resolution failure").await;
+                        failed.push(("resolve".to_string(), message));
                         (MirrorDirection::Pull, planned_image.clone(), Vec::new())
                     }
                 },
@@ -311,7 +311,10 @@ async fn execute_due_jobs<M: SchedulerStore, B: BlobStore>(
                 {
                     Ok((image, tags)) => (MirrorDirection::Pull, image, tags),
                     Err(e) => {
-                        failed.push(("resolve".to_string(), e.to_string()));
+                        let message = e.to_string();
+                        run.mark_resolution_failed(&message, now_epoch());
+                        persist_sync_run(&state.core.metadata, &run, "resolution failure").await;
+                        failed.push(("resolve".to_string(), message));
                         (MirrorDirection::Pull, planned_image.clone(), Vec::new())
                     }
                 },
@@ -321,8 +324,20 @@ async fn execute_due_jobs<M: SchedulerStore, B: BlobStore>(
                     planned_tags.clone(),
                 ),
             };
+            if failed.is_empty() {
+                run.mark_resolution_finished(tags.len(), now_epoch());
+                persist_sync_run(&state.core.metadata, &run, "resolution complete").await;
+            }
 
             for tag in &tags {
+                let tag_phase = if direction == MirrorDirection::Push {
+                    "Pushing tag"
+                } else {
+                    "Pulling tag"
+                };
+                run.mark_tag_started(tag, tag_phase, now_epoch());
+                persist_sync_run(&state.core.metadata, &run, "tag start").await;
+
                 let result = if direction == MirrorDirection::Push {
                     match rule_id.as_deref() {
                         Some(rule_id) => {
@@ -352,6 +367,14 @@ async fn execute_due_jobs<M: SchedulerStore, B: BlobStore>(
                     Ok(true) => {
                         tracing::info!("sync: {}:{} ok", image, tag);
                         synced.push(tag.clone());
+                        run.mark_tag_finished(
+                            tag,
+                            SyncRunEventKind::Success,
+                            "Synced tag",
+                            synced.len() + failed.len(),
+                            now_epoch(),
+                        );
+                        persist_sync_run(&state.core.metadata, &run, "tag success").await;
                     }
                     Ok(false) => {
                         let message = if direction == MirrorDirection::Push {
@@ -361,10 +384,27 @@ async fn execute_due_jobs<M: SchedulerStore, B: BlobStore>(
                         };
                         tracing::warn!("sync: {}:{} {}", image, tag, message);
                         failed.push((tag.clone(), message.into()));
+                        run.mark_tag_finished(
+                            tag,
+                            SyncRunEventKind::Warning,
+                            message,
+                            synced.len() + failed.len(),
+                            now_epoch(),
+                        );
+                        persist_sync_run(&state.core.metadata, &run, "tag missing").await;
                     }
                     Err(e) => {
-                        tracing::error!("sync: {}:{} failed: {}", image, tag, e);
-                        failed.push((tag.clone(), e.to_string()));
+                        let message = e.to_string();
+                        tracing::error!("sync: {}:{} failed: {}", image, tag, message);
+                        failed.push((tag.clone(), message.clone()));
+                        run.mark_tag_finished(
+                            tag,
+                            SyncRunEventKind::Error,
+                            message,
+                            synced.len() + failed.len(),
+                            now_epoch(),
+                        );
+                        persist_sync_run(&state.core.metadata, &run, "tag failure").await;
                     }
                 }
             }
@@ -402,22 +442,22 @@ async fn execute_due_jobs<M: SchedulerStore, B: BlobStore>(
                 tracing::warn!(err = %e, "scheduler: failed to update sync job status");
             }
 
-            let updated_run = SyncJobRun {
-                id: run_id,
-                job_id,
-                node_id: node,
-                started_at: run_started_at,
-                finished_at: Some(now),
-                status: run_status,
-                tags_synced: synced,
-                tags_failed: failed,
-            };
-            if let Err(e) = state.core.metadata.put_sync_job_run(updated_run).await {
-                tracing::warn!(err = %e, "scheduler: failed to record sync run completion");
-            }
+            run.mark_finished(run_status, synced, failed, now);
+            persist_sync_run(&state.core.metadata, &run, "completion").await;
 
             drop(permit);
         });
+    }
+}
+
+async fn persist_sync_run<M: JobStore>(metadata: &M, run: &SyncJobRun, context: &str) {
+    if let Err(e) = metadata.put_sync_job_run(run.clone()).await {
+        tracing::warn!(
+            err = %e,
+            run_id = %run.id,
+            context,
+            "scheduler: failed to record sync run progress"
+        );
     }
 }
 

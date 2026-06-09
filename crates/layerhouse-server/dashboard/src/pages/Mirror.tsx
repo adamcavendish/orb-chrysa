@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import {
   ApiError,
   createMirrorRule,
@@ -6,6 +6,7 @@ import {
   fetchMirrorRules,
   fetchSession,
   fetchSyncJobs,
+  fetchSyncJobRuns,
   redirectToSignIn,
   triggerMirrorRule,
 } from "../lib/api";
@@ -17,6 +18,7 @@ import type {
   MirrorStrategy,
   OutboundProxyProtocol,
   SyncJob,
+  SyncJobRun,
 } from "../lib/types";
 import { formatAgo, formatTime, normalizeOptionalPrefix, normalizeRegistry, strategyLabel, upstreamLabel } from "../lib/format";
 import { t } from "../lib/i18n";
@@ -101,10 +103,57 @@ function statusBadge(status: string) {
   return <span class={`badge ${cls}`}>{status}</span>;
 }
 
+const RUN_REFRESH_SECONDS = 30;
+
+function isTerminalRun(run: SyncJobRun | null | undefined) {
+  return !!run && run.status !== "Running";
+}
+
+function progressPercent(run: SyncJobRun | null | undefined) {
+  if (!run) return 0;
+  const totalTags = run.total_tags ?? 0;
+  const completedTags = run.completed_tags ?? 0;
+  if (totalTags <= 0) return run.status === "Running" ? 0 : 100;
+  return Math.round((completedTags / totalTags) * 100);
+}
+
+function progressSummary(run: SyncJobRun | null | undefined) {
+  if (!run) return t("common.notAvailable");
+  const totalTags = run.total_tags ?? 0;
+  const completedTags = run.completed_tags ?? 0;
+  if (totalTags <= 0) {
+    return run.status === "Running" ? run.phase ?? run.status : run.status;
+  }
+  return `${completedTags} / ${totalTags} tags`;
+}
+
+function formatDuration(startedAt: number | null | undefined, finishedAt?: number | null) {
+  if (!startedAt) return t("time.never");
+  const end = finishedAt ?? Math.floor(Date.now() / 1000);
+  const seconds = Math.max(0, end - startedAt);
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return `${hours}h ${minutes}m`;
+}
+
+function eventClass(kind: SyncJobRun["recent_events"][number]["kind"]) {
+  if (kind === "Success") return "run-event-success";
+  if (kind === "Warning") return "run-event-warning";
+  if (kind === "Error") return "run-event-error";
+  return "run-event-info";
+}
+
 export default function Mirror() {
   const [tab, setTab] = createSignal<"rules" | "jobs">("rules");
   const [rules, setRules] = createSignal<MirrorRule[]>([]);
   const [jobs, setJobs] = createSignal<SyncJob[]>([]);
+  const [selectedJobId, setSelectedJobId] = createSignal<string | null>(null);
+  const [latestRuns, setLatestRuns] = createSignal<Record<string, SyncJobRun | null>>({});
+  const [runLoading, setRunLoading] = createSignal(false);
+  const [runError, setRunError] = createSignal<string | null>(null);
+  const [refreshCountdown, setRefreshCountdown] = createSignal(RUN_REFRESH_SECONDS);
   const [session, setSession] = createSignal<DashboardSession | null>(null);
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<string | null>(null);
@@ -114,6 +163,57 @@ export default function Mirror() {
   const [saving, setSaving] = createSignal(false);
   const [triggering, setTriggering] = createSignal<string | null>(null);
   const [deleteId, setDeleteId] = createSignal<string | null>(null);
+  const selectedJob = createMemo(() => {
+    const id = selectedJobId();
+    return id ? jobs().find((job) => job.id === id) ?? null : null;
+  });
+  const selectedRun = createMemo(() => {
+    const id = selectedJobId();
+    return id ? latestRuns()[id] ?? null : null;
+  });
+  const selectedEvents = createMemo(() => (selectedRun()?.recent_events ?? []).slice().reverse());
+
+  function nextSelectedJobId(nextJobs: SyncJob[]) {
+    const current = selectedJobId();
+    if (current && nextJobs.some((job) => job.id === current)) return current;
+    return nextJobs.find((job) => job.status === "Running")?.id ?? nextJobs[0]?.id ?? null;
+  }
+
+  function selectDefaultJob(nextJobs: SyncJob[]) {
+    const nextId = nextSelectedJobId(nextJobs);
+    setSelectedJobId(nextId);
+    return nextId;
+  }
+
+  async function fetchLatestRunEntry(jobId: string) {
+    const runs = await fetchSyncJobRuns(jobId, 1);
+    return [jobId, runs[0] ?? null] as const;
+  }
+
+  async function primeLatestRuns(nextJobs: SyncJob[], selectedId: string | null) {
+    const jobIds = new Set(nextJobs.filter((job) => job.status === "Running").map((job) => job.id));
+    if (selectedId) jobIds.add(selectedId);
+
+    for (const jobId of jobIds) {
+      try {
+        const [id, run] = await fetchLatestRunEntry(jobId);
+        setLatestRuns((current) => ({ ...current, [id]: run }));
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 401) {
+          redirectToSignIn();
+          return;
+        }
+        // Run details are supplemental; leave the main job list usable.
+      }
+    }
+  }
+
+  function pruneLatestRuns(nextJobs: SyncJob[]) {
+    const jobIds = new Set(nextJobs.map((job) => job.id));
+    setLatestRuns((current) =>
+      Object.fromEntries(Object.entries(current).filter(([jobId]) => jobIds.has(jobId)))
+    );
+  }
 
   async function load() {
     try {
@@ -125,8 +225,12 @@ export default function Mirror() {
       setSession(s);
       setRules(nextRules);
       setJobs(nextJobs);
+      pruneLatestRuns(nextJobs);
+      const selectedId = selectDefaultJob(nextJobs);
+      void primeLatestRuns(nextJobs, selectedId);
       setError(null);
       setErrorCount(0);
+      setRunError(null);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
         redirectToSignIn();
@@ -147,9 +251,63 @@ export default function Mirror() {
     }
   }
 
+  async function refreshJobList() {
+    const nextJobs = await fetchSyncJobs();
+    setJobs(nextJobs);
+    pruneLatestRuns(nextJobs);
+    const selectedId = selectDefaultJob(nextJobs);
+    void primeLatestRuns(nextJobs, selectedId);
+  }
+
+  async function refreshSelectedRun(jobId = selectedJobId()) {
+    if (!jobId) return;
+    setRunLoading(true);
+    try {
+      const runs = await fetchSyncJobRuns(jobId, 1);
+      const run = runs[0] ?? null;
+      setLatestRuns((current) => ({ ...current, [jobId]: run }));
+      setRunError(null);
+      setRefreshCountdown(RUN_REFRESH_SECONDS);
+      if (isTerminalRun(run)) {
+        await refreshJobList();
+      }
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        redirectToSignIn();
+        return;
+      }
+      const message = e instanceof Error ? e.message : t("mirror.fetchError");
+      setRunError(message);
+      setRefreshCountdown(RUN_REFRESH_SECONDS);
+    } finally {
+      setRunLoading(false);
+    }
+  }
+
   createEffect(() => {
     load();
-    const id = setInterval(load, 10_000);
+  });
+
+  let lastSelectedJobId: string | null = null;
+  createEffect(() => {
+    const jobId = selectedJobId();
+    if (tab() !== "jobs" || !jobId || jobId === lastSelectedJobId) return;
+    lastSelectedJobId = jobId;
+    void refreshSelectedRun(jobId);
+  });
+
+  createEffect(() => {
+    const jobId = selectedJobId();
+    if (tab() !== "jobs" || !jobId) return;
+    setRefreshCountdown(RUN_REFRESH_SECONDS);
+    const id = window.setInterval(() => {
+      if (runLoading()) return;
+      setRefreshCountdown((seconds) => {
+        const next = Math.max(0, seconds - 1);
+        if (next === 0) void refreshSelectedRun(jobId);
+        return next;
+      });
+    }, 1000);
     onCleanup(() => clearInterval(id));
   });
 
@@ -315,34 +473,152 @@ export default function Mirror() {
             when={jobs().length > 0}
             fallback={<EmptyState title={t("mirror.noJobs")} description={t("mirror.noJobsDesc")} />}
           >
-            <table>
-              <thead>
-                <tr>
-                  <th>{t("mirror.job")}</th>
-                  <th>{t("mirror.rule")}</th>
-                  <th>{t("mirror.image")}</th>
-                  <th>{t("common.status")}</th>
-                  <th>{t("mirror.lastRun")}</th>
-                  <th>{t("mirror.nextRun")}</th>
-                  <th>{t("mirror.lastError")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <For each={jobs()}>
-                  {(job) => (
+            <div class="mirror-jobs-layout">
+              <div class="mirror-jobs-table">
+                <table>
+                  <thead>
                     <tr>
-                      <td><code>{job.id}</code></td>
-                      <td>{job.rule_name ?? job.rule_id ?? "-"}</td>
-                      <td>{job.image}</td>
-                      <td>{statusBadge(job.status)}</td>
-                      <td>{formatTime(job.last_run_at)}</td>
-                      <td>{job.interval_secs === 0 ? t("common.adHoc") : formatAgo(job.next_run_at)}</td>
-                      <td class="error-cell">{job.last_error ?? "-"}</td>
+                      <th>{t("mirror.job")}</th>
+                      <th>{t("mirror.rule")}</th>
+                      <th>{t("mirror.image")}</th>
+                      <th>{t("mirror.progress")}</th>
+                      <th>{t("common.status")}</th>
+                      <th>{t("mirror.lastRun")}</th>
+                      <th>{t("mirror.lastError")}</th>
                     </tr>
+                  </thead>
+                  <tbody>
+                    <For each={jobs()}>
+                      {(job) => {
+                        const rowRun = createMemo(() => latestRuns()[job.id] ?? null);
+                        const selected = createMemo(() => selectedJobId() === job.id);
+                        return (
+                          <tr
+                            class={`job-row ${selected() ? "selected" : ""}`}
+                            tabIndex={0}
+                            onClick={() => setSelectedJobId(job.id)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                setSelectedJobId(job.id);
+                              }
+                            }}
+                          >
+                            <td><code>{job.id}</code></td>
+                            <td>{job.rule_name ?? job.rule_id ?? "-"}</td>
+                            <td>{job.image}</td>
+                            <td>
+                              <div class="run-progress-cell">
+                                <div class="run-progress-track">
+                                  <div
+                                    class="run-progress-fill"
+                                    style={{ width: `${progressPercent(rowRun())}%` }}
+                                  />
+                                </div>
+                                <span>{rowRun() ? `${progressPercent(rowRun())}%` : "-"}</span>
+                              </div>
+                            </td>
+                            <td>{statusBadge(job.status)}</td>
+                            <td>{formatTime(job.last_run_at)}</td>
+                            <td class="error-cell">{job.last_error ?? rowRun()?.tags_failed?.[0]?.[1] ?? "-"}</td>
+                          </tr>
+                        );
+                      }}
+                    </For>
+                  </tbody>
+                </table>
+              </div>
+
+              <aside class="run-inspector">
+                <div class="run-inspector-header">
+                  <div>
+                    <p class="label">{t("mirror.selectedRun")}</p>
+                    <h2>{selectedJob()?.id ?? t("common.none")}</h2>
+                    <p>{selectedJob()?.rule_name ?? selectedJob()?.rule_id ?? "-"}</p>
+                  </div>
+                  <div class="run-refresh">
+                    <button
+                      class="btn btn-compact run-refresh-button"
+                      aria-label={t("mirror.refreshRun")}
+                      disabled={runLoading() || !selectedJobId()}
+                      onClick={() => void refreshSelectedRun()}
+                    >
+                      ↻
+                    </button>
+                    <span>{t("mirror.refreshIn", { seconds: refreshCountdown() })}</span>
+                  </div>
+                </div>
+
+                <Show when={runError()}>
+                  <p class="run-error">{runError()}</p>
+                </Show>
+
+                <Show
+                  when={selectedRun()}
+                  fallback={<p class="run-empty">{t("mirror.noRunSelected")}</p>}
+                >
+                  {(run) => (
+                    <>
+                      <div class="run-summary">
+                        <div
+                          class="run-ring"
+                          style={{
+                            "--run-progress": `${progressPercent(run()) * 3.6}deg`,
+                          }}
+                        >
+                          <span>{progressPercent(run())}%</span>
+                        </div>
+                        <div>
+                          <p class="label">{t("mirror.progress")}</p>
+                          <h3>{progressSummary(run())}</h3>
+                          <p>{t("mirror.elapsed", { duration: formatDuration(run().started_at, run().finished_at) })}</p>
+                        </div>
+                      </div>
+
+                      <div class="run-current">
+                        <p class="label">{t("mirror.current")}</p>
+                        <h3>{run().phase ?? run().status}</h3>
+                        <p>
+                          {run().current_tag
+                            ? t("mirror.currentTag", { tag: run().current_tag ?? "" })
+                            : t("mirror.updated", {
+                                time: formatAgo(run().updated_at ?? run().finished_at ?? run().started_at),
+                              })}
+                        </p>
+                        <p>
+                          {t("mirror.failures", { count: (run().tags_failed ?? []).length })}
+                        </p>
+                      </div>
+
+                      <div class="run-events">
+                        <div class="run-events-header">
+                          <p class="label">{t("mirror.recentEvents")}</p>
+                          <span>{selectedEvents().length}</span>
+                        </div>
+                        <Show
+                          when={selectedEvents().length > 0}
+                          fallback={<p class="run-empty">{t("mirror.noEvents")}</p>}
+                        >
+                          <For each={selectedEvents()}>
+                            {(event) => (
+                              <div class="run-event">
+                                <span class={`run-event-kind ${eventClass(event.kind)}`}>
+                                  {event.kind}
+                                </span>
+                                <div>
+                                  <p>{event.tag ? `${event.tag} · ${event.message}` : event.message}</p>
+                                  <span>{formatAgo(event.at)}</span>
+                                </div>
+                              </div>
+                            )}
+                          </For>
+                        </Show>
+                      </div>
+                    </>
                   )}
-                </For>
-              </tbody>
-            </table>
+                </Show>
+              </aside>
+            </div>
           </Show>
         )}
       </div>
