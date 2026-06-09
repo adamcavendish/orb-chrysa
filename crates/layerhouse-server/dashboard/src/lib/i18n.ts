@@ -212,7 +212,7 @@ const en: Messages = {
   "access.expiry.90": "90 days",
   "access.expiry.never": "Never",
   "access.repositoryPattern": "Repository pattern",
-  "access.repositoryPatternHint": "Use a prefix like qa/* or release/*. Use * only for trusted automation.",
+  "access.repositoryPatternHint": "Use a prefix like team/* or release/*. Use * only for trusted automation.",
   "access.allowedActions": "Allowed actions",
   "access.pull": "Pull",
   "access.push": "Push",

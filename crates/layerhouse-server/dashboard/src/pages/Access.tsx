@@ -29,7 +29,7 @@ interface TokenForm {
 
 const EMPTY_FORM: TokenForm = {
   name: "",
-  repositoryPattern: "qa/*",
+  repositoryPattern: "",
   expiresInDays: "30",
   actions: {
     pull: true,
@@ -448,6 +448,7 @@ export default function Access() {
                       <label>{t("access.repositoryPattern")}</label>
                       <input
                         value={form().repositoryPattern}
+                        placeholder="team/*"
                         onInput={(event) =>
                           setForm({ ...form(), repositoryPattern: event.currentTarget.value })
                         }
