@@ -244,9 +244,15 @@ jobs:
 
       - name: Build all targets
         run: |
-          cargo zigbuild --release -p layerhouse-server \
-            --target x86_64-unknown-linux-gnu \
-            --target aarch64-unknown-linux-gnu
+          # The server build script writes dashboard/dist for rust-embed.
+          # Build targets one at a time so concurrent build scripts do not race
+          # while Vite clears and rewrites that shared directory.
+          for target in \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu
+          do
+            cargo zigbuild --release -p layerhouse-server --target "$target"
+          done
 
       - name: Upload binaries
         uses: actions/upload-artifact@v7
