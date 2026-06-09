@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${VERSION:-0.2.3}"
+VERSION="${VERSION:-0.0.2}"
 WORK="${WORK:-target/release-dry-run/$VERSION}"
 SKIP_CHECK="${RELEASE_DRY_RUN_SKIP_CHECK:-0}"
 

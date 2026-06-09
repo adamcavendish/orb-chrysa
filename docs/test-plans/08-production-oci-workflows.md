@@ -398,8 +398,8 @@ just release-dry-run
 
 ```bash
 export RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
-export VERSION="0.2.3"
-export TAG="v$VERSION"
+export VERSION="0.0.2"
+export TAG="$VERSION"
 export WORK="/tmp/orb-release-$RUN_ID"
 umask 077
 mkdir -p "$WORK"
@@ -418,10 +418,10 @@ gh run watch --exit-status
 gh release view "$TAG" --json tagName,name,assets,url \
   | tee "$WORK/release.json"
 
-docker pull "ghcr.io/adamcavendish/layerhouse-server:$TAG" \
-  | tee "$WORK/docker-pull-v-tag.txt"
 docker pull "ghcr.io/adamcavendish/layerhouse-server:$VERSION" \
-  | tee "$WORK/docker-pull-plain-tag.txt"
+  | tee "$WORK/docker-pull-version-tag.txt"
+docker pull "ghcr.io/adamcavendish/layerhouse-server:latest" \
+  | tee "$WORK/docker-pull-latest-tag.txt"
 
 gh release download "$TAG" --dir "$WORK/assets"
 tar -xOf "$WORK/assets/layerhouse-$VERSION.tgz" layerhouse/Chart.yaml \
@@ -433,7 +433,7 @@ grep -q "^appVersion: $VERSION$" "$WORK/chart-yaml.txt"
 ### Expected Checks
 
 - Release workflow completes successfully.
-- GHCR image exists with both `$TAG` and `$VERSION` tags.
+- GHCR image exists with `$VERSION` and `latest` tags.
 - GitHub Release contains CLI binaries and `layerhouse-$VERSION.tgz`.
 - Chart archive metadata has `version: $VERSION` and `appVersion: $VERSION`.
 - Rendering the chart without `image.tag` uses `$VERSION`; explicit
@@ -444,7 +444,7 @@ grep -q "^appVersion: $VERSION$" "$WORK/chart-yaml.txt"
 - Git status before tag.
 - GitHub Actions run URL and conclusion.
 - GitHub Release JSON.
-- Docker pull logs for both tags.
+- Docker pull logs for version and latest tags.
 - Downloaded asset listing and chart metadata.
 
 ### Cleanup And Rollback
